@@ -1,0 +1,8 @@
+.playwright-mcp/
+.DS_Store
+node_modules/
+.env
+.env.*
+*.log
+.idea/
+.vscode/
