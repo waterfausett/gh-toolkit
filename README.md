@@ -50,10 +50,6 @@ If either fails (signed out, SSO expired, very large PR where GitHub refuses to 
 
 Every feature has a toggle in the settings modal, opened with the ⚙ in the panel bar or Alt+, (grouped, with a Reset to defaults button). **Edit config (JSON)** and **Reset config** are in the Tampermonkey menu; only settings you change are stored.
 
-## Removed because they need an API token
-
-Failing checks, the AI Generated banner, and the diff since your last review. The data isn't available from the signed-in pages without the GitHub API. Possible to bring back with a read-only token or a local helper that proxies `gh auth token`.
-
 ## Maintenance notes
 
 GitHub's DOM changes. Per-file features anchor on each file container's `id="diff-<sha256 of path>"`, the `data-file-path` button in the header, and the header's chevron button (see `fileEntries`, `fileContainer`, `findChevron`). The file tree is matched through `role="tree"` / `role="treeitem"`. If a per-file feature stops working, those are the first places to look.
