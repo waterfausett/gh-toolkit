@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.11.2
+// @version      0.11.3
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -1936,6 +1936,31 @@
       .join("\n");
   };
 
+  const isInline = (node) => node.classList?.contains("prr-inline-progress") || node.classList?.contains("prr-inline-leftovers");
+
+  const isIconOnly = (node) =>
+    node &&
+    !node.textContent.trim() &&
+    (node.matches("svg") || Boolean(node.querySelector("svg"))) &&
+    !node.matches("button, a, [role='button']") &&
+    !node.querySelector("button, a, [role='button']");
+
+  // GitHub's progress circle sits beside or around the counter text, so the leftovers badge goes before the whole group.
+  const counterGroup = (counter) => {
+    let el = counter;
+    const text = (node) => [...node.childNodes].filter((child) => !isInline(child)).map((child) => child.textContent).join("");
+    const wrapsOnlyCounter = (node) =>
+      node !== document.body && VIEWED_COUNTER.test(text(node)) && !node.querySelector("button:not(.prr-inline-leftovers), a, [role='button']");
+    while (el.parentElement && wrapsOnlyCounter(el.parentElement)) el = el.parentElement;
+    let prev = el.previousElementSibling;
+    while (prev && isInline(prev)) prev = prev.previousElementSibling;
+    while (isIconOnly(prev)) {
+      el = prev;
+      prev = el.previousElementSibling;
+    }
+    return el;
+  };
+
   const placeInlineIndicators = (snapshot) => {
     const here = FILES_PATH.test(location.pathname);
     const both = here ? snapshot?.progressBoth : null;
@@ -1947,7 +1972,7 @@
     const count = leftovers.length;
     syncInline(
       "prr-inline-leftovers",
-      counter,
+      counter && counterGroup(counter),
       count ? String(count) : "",
       () =>
         h(
