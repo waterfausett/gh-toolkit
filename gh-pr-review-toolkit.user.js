@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.13.0
+// @version      0.14.0
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -45,6 +45,7 @@
       reviewProgress: true,
       bulkViewed: true,
       filePalette: true,
+      myPrs: true,
       suggestFromSelection: true,
       collapseTrivial: true,
       leftovers: true,
@@ -107,6 +108,7 @@
         { key: "changedFilter", label: "\"Changed since viewed\" in the file filter" },
         { key: "reviewButton", label: "Review button", hint: "Alt+R", note: "Opens GitHub's review dialog, going to Files first if needed" },
         { key: "filePalette", label: "Quick file jump", hint: "Alt+P", note: "Fuzzy-find a file in this PR and jump to it" },
+        { key: "myPrs", label: "My pull requests", hint: "Alt+M", note: "Opens the PRs you authored; the shortcut works on any GitHub page" },
       ],
     },
     {
@@ -2354,6 +2356,11 @@
     }, 1500);
   };
 
+  const myPrsHref = () => {
+    const login = document.querySelector("meta[name='user-login']")?.content;
+    return login ? `/pulls/${encodeURIComponent(login)}` : "/pulls";
+  };
+
   const ticketChip = ([id, url]) =>
     url
       ? h("a", { class: "prr-chip", href: url, target: "_blank", rel: "noreferrer", title: `Open ${id}` }, id)
@@ -2451,6 +2458,7 @@
     { keys: ["Alt", ","], label: "Open settings" },
     { keys: ["Alt", "/"], label: "Show this help" },
     { keys: ["Alt", "P"], label: "Jump to a file by name", feature: "filePalette" },
+    { keys: ["Alt", "M"], label: "Open your pull requests", feature: "myPrs" },
     { keys: ["Alt", "G"], label: "Suggest a change on the selected lines", feature: "suggestFromSelection", filesOnly: true },
     { keys: ["Alt", "L"], label: "Next debug leftover", feature: "leftovers", filesOnly: true },
     { keys: ["Alt", "Shift", "L"], label: "Previous debug leftover", feature: "leftovers", filesOnly: true },
@@ -2562,6 +2570,7 @@
         config.features.reviewButton
           ? h("button", { class: "prr-btn prr-review", type: "button", title: "Open GitHub's review dialog (Alt+R)", onclick: openReview }, "Review")
           : null,
+        config.features.myPrs ? h("a", { class: "prr-btn", href: myPrsHref(), title: "Your pull requests (Alt+M)" }, "My PRs") : null,
         h("button", { class: "prr-btn", type: "button", title: "Scroll to top", onclick: () => scrollTo({ top: 0, behavior: "smooth" }) }, "↑ Top"),
         h("button", { class: "prr-btn", type: "button", title: "Keyboard shortcuts (Alt+/)", "aria-label": "Keyboard shortcuts", onclick: toggleHelp }, "?"),
         h("button", { class: "prr-btn", type: "button", title: "Settings (Alt+,)", "aria-label": "Settings", onclick: toggleSettings }, "⚙"),
@@ -2940,6 +2949,7 @@
       border: 1px solid var(--borderColor-default, #d0d7de); background: var(--bgColor-muted, #f6f8fa); color: inherit;
       transition: background-color .12s, border-color .12s; }
     .prr-btn:hover { background: var(--control-bgColor-hover, #eaeef2); }
+    a.prr-btn, a.prr-btn:hover { display: inline-block; text-decoration: none; }
     .prr-btn:focus-visible, .prr-tab:focus-visible { outline: 2px solid var(--focus-outlineColor, #0969da); outline-offset: 1px; }
     .prr-tools .prr-btn { margin: 0; min-width: 24px; padding: 0 6px; border-color: transparent; background: transparent; color: var(--fgColor-muted, #656d76); }
     .prr-tools .prr-btn:hover { background: var(--control-bgColor-hover, #eaeef2); color: var(--fgColor-default, #1f2328); }
@@ -3096,6 +3106,11 @@
     if (altOnly && state.pr && event.code === "Comma") {
       event.preventDefault();
       toggleSettings();
+      return;
+    }
+    if (altOnly && config.features.myPrs && event.code === "KeyM") {
+      event.preventDefault();
+      goTo(myPrsHref());
       return;
     }
     if (altOnly && state.pr && config.features.filePalette && event.code === "KeyP") {
