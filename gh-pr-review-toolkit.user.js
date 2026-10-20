@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.12.2
+// @version      0.13.0
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -1826,18 +1826,46 @@
 
   const summaryKey = (pr) => `v3:summary:${digest(pr.key)}`;
 
+  const MAX_DEP_TITLE_LINES = 12;
+  const DEP_MARKS = { added: ["+", "prr-add"], removed: ["−", "prr-del"], changed: ["~", "prr-muted"] };
+
+  const allDeps = () => (state.files ?? []).flatMap((file) => file.deps);
+
+  const depCounts = (deps) => ({
+    added: deps.filter((dep) => dep.change === "added").length,
+    removed: deps.filter((dep) => dep.change === "removed").length,
+    changed: deps.filter((dep) => dep.change === "changed").length,
+  });
+
+  const depBadgeText = ({ added, removed, changed }) =>
+    ["deps", added && `+${added}`, removed && `−${removed}`, changed && `~${changed}`].filter(Boolean).join(" ");
+
+  const depLine = ({ change, name, version, from }) =>
+    `${DEP_MARKS[change][0]} ${name} ${change === "changed" && from !== version ? `${from} → ${version}` : (version ?? "")}`.trim();
+
+  const depTitleLines = (deps) => [
+    ...deps.slice(0, MAX_DEP_TITLE_LINES).map(depLine),
+    deps.length > MAX_DEP_TITLE_LINES ? `and ${deps.length - MAX_DEP_TITLE_LINES} more` : null,
+  ].filter(Boolean);
+
   // PR lists only have the stored records to go on, which lack line counts, so each visit leaves a small summary behind.
   const saveSummary = (snapshot) => {
     if (!config.features.listBadges || !state.files?.length) return;
     const records = viewedRecords();
-    if (!Object.keys(records).length) {
-      if (store.get(summaryKey(state.pr))) GM_deleteValue(summaryKey(state.pr));
+    const summary = {};
+    if (Object.keys(records).length) {
+      const [mine, all] =
+        snapshot?.progressBoth ?? [false, true].map((everything) => reviewProgress(liveViewed(viewedControls()), records, everything));
+      Object.assign(summary, { mine: mine.pct, all: all.pct, mineFiles: mine.files, files: all.files, viewedFiles: all.viewedFiles });
+    }
+    const deps = allDeps();
+    if (deps.length) summary.deps = { ...depCounts(deps), lines: depTitleLines(deps) };
+    const saved = store.get(summaryKey(state.pr));
+    if (!Object.keys(summary).length) {
+      if (saved) GM_deleteValue(summaryKey(state.pr));
       return;
     }
-    const [mine, all] =
-      snapshot?.progressBoth ?? [false, true].map((everything) => reviewProgress(liveViewed(viewedControls()), records, everything));
-    const summary = { mine: mine.pct, all: all.pct, mineFiles: mine.files, files: all.files, viewedFiles: all.viewedFiles };
-    if (JSON.stringify(store.get(summaryKey(state.pr))) !== JSON.stringify(summary)) store.set(summaryKey(state.pr), summary);
+    if (JSON.stringify(saved) !== JSON.stringify(summary)) store.set(summaryKey(state.pr), summary);
   };
 
   const reviewData = () => {
@@ -1980,7 +2008,8 @@
       .join("\n");
   };
 
-  const isInline = (node) => node.classList?.contains("prr-inline-progress") || node.classList?.contains("prr-inline-leftovers");
+  const INLINE_CLASSES = ["prr-inline-progress", "prr-inline-leftovers", "prr-inline-deps"];
+  const isInline = (node) => INLINE_CLASSES.some((cls) => node.classList?.contains(cls));
 
   const isIconOnly = (node) =>
     node &&
@@ -1994,7 +2023,7 @@
     let el = counter;
     const text = (node) => [...node.childNodes].filter((child) => !isInline(child)).map((child) => child.textContent).join("");
     const wrapsOnlyCounter = (node) =>
-      node !== document.body && VIEWED_COUNTER.test(text(node)) && !node.querySelector("button:not(.prr-inline-leftovers), a, [role='button']");
+      node !== document.body && VIEWED_COUNTER.test(text(node)) && !node.querySelector("button:not(.prr-inline-leftovers, .prr-inline-deps), a, [role='button']");
     while (el.parentElement && wrapsOnlyCounter(el.parentElement)) el = el.parentElement;
     let prev = el.previousElementSibling;
     while (prev && isInline(prev)) prev = prev.previousElementSibling;
@@ -2009,7 +2038,8 @@
     const here = FILES_PATH.test(location.pathname);
     const both = here ? snapshot?.progressBoth : null;
     const leftovers = here && config.features.leftovers ? leftoverList() : [];
-    const counter = both || leftovers.length ? findViewedCounter() : null;
+    const deps = here && config.features.depSummary ? allDeps() : [];
+    const counter = both || leftovers.length || deps.length ? findViewedCounter() : null;
     const text = both ? progressText(...both) : "";
     const title = both ? progressTitle(...both) : "";
     syncInline("prr-inline-progress", counter, text && `${text}|${title}`, () => h("span", { class: "prr-inline-progress", title }, text), "after");
@@ -2026,6 +2056,24 @@
         ),
       "before",
     );
+    const depText = deps.length ? depBadgeText(depCounts(deps)) : "";
+    const depTitle = ["Dependency changes: show them in the panel", ...depTitleLines(deps)].join("\n");
+    syncInline(
+      "prr-inline-deps",
+      counter && (document.querySelector(".prr-inline-leftovers") ?? counterGroup(counter)),
+      depText && `${depText}|${depTitle}`,
+      () => h("button", { class: "prr-badge prr-muted prr-inline-deps", type: "button", title: depTitle, onclick: showDepsInPanel }, depText),
+      "before",
+    );
+  };
+
+  const showDepsInPanel = () => {
+    if (!panelOpen) {
+      panelOpen = true;
+      store.set("panelOpen", true);
+      renderPanel(true);
+    }
+    document.querySelector("#prr-panel .prr-deps-section")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   };
 
   const bulkSection = (counts) =>
@@ -2065,7 +2113,6 @@
   const MAX_PANEL_ROWS = 8;
   const MAX_DEP_ROWS = 25;
 
-  const DEP_MARKS = { added: ["+", "prr-add"], removed: ["−", "prr-del"], changed: ["~", "prr-muted"] };
   const SECTION_TAGS = { devDependencies: "dev", peerDependencies: "peer", optionalDependencies: "optional", dependencies: "" };
 
   const depRow = ({ change, name, version, from, section, fromSection }) => {
@@ -2227,13 +2274,13 @@
           budget -= rows.length;
           return [h("div", { class: "prr-block prr-muted prr-dep-file", title: file.filename }, file.filename), ...rows];
         });
-        out.push(
-          section(
-            `Dependencies (${total})`,
-            ...body,
-            total > MAX_DEP_ROWS ? h("div", { class: "prr-muted" }, `and ${total - MAX_DEP_ROWS} more`) : null,
-          ),
+        const deps = section(
+          `Dependencies (${total})`,
+          ...body,
+          total > MAX_DEP_ROWS ? h("div", { class: "prr-muted" }, `and ${total - MAX_DEP_ROWS} more`) : null,
         );
+        deps.classList.add("prr-deps-section");
+        out.push(deps);
       }
     }
 
@@ -2703,12 +2750,16 @@
     const summary = store.get(summaryKey(pr));
     const look = config.features.sinceLastLook && store.get(lastLookKey(pr)) ? sinceLastLook(pr, cachedOids(pr)) : null;
     const badges = [];
-    if (summary) {
+    if (summary?.files) {
       const scoped = summary.mineFiles > 0 && summary.mineFiles < summary.files;
       const pct = scoped ? summary.mine : summary.all;
       const share = scoped ? `${summary.mine}% of your lines, ${summary.all}% of all` : `${summary.all}% of lines`;
       const title = `${summary.viewedFiles}/${summary.files} files viewed · ${share} (as of your last visit)`;
       badges.push(h("span", { class: `prr-badge ${pct >= 100 ? "prr-done" : "prr-muted"}`, title }, pct >= 100 ? "✓ reviewed" : `${pct}% reviewed`));
+    }
+    if (summary?.deps && config.features.depSummary) {
+      const title = ["Dependency changes (as of your last visit)", ...summary.deps.lines].join("\n");
+      badges.push(h("span", { class: "prr-badge prr-muted", title }, depBadgeText(summary.deps)));
     }
     const pending = store.get("pendingReviews", {})[pr.key];
     if (pending) {
@@ -2909,8 +2960,10 @@
       padding: 1px 6px; margin-right: 6px; border-radius: 999px; white-space: nowrap; }
     .prr-inline-progress { display: inline-flex; align-items: center; align-self: center; vertical-align: middle; margin-left: 8px; font-size: 12px;
       white-space: nowrap; color: var(--fgColor-muted, #656d76); font-variant-numeric: tabular-nums; }
-    .prr-inline-leftovers { margin: 0 8px 0 0; border: 0; font-family: inherit; cursor: pointer; }
-    .prr-inline-leftovers:hover { text-decoration: underline; }
+    .prr-inline-leftovers, .prr-inline-deps { margin: 0 8px 0 0; font-family: inherit; cursor: pointer; }
+    .prr-inline-leftovers { border: 0; }
+    .prr-inline-deps { color: var(--fgColor-muted, #656d76); background: transparent; }
+    .prr-inline-leftovers:hover, .prr-inline-deps:hover { text-decoration: underline; }
     .prr-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-left: 6px; vertical-align: middle;
       font-size: 11px; font-weight: 400; line-height: 16px; }
     .prr-meta .prr-badge { margin-right: 0; text-decoration: none; }
