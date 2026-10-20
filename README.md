@@ -377,9 +377,3 @@ The pending-review warning reads the count from GitHub's own review button: in t
 
 List badges and ticket chips off a PR attach after PR title links (`a[data-hovercard-type="pull_request"]` or the classic `a.js-navigation-open`), branch links (`a[href^="/<owner>/<repo>/tree/"]` whose text is the branch name) and commit links whose text isn't a SHA (`decoratePrLinks`, `decorateBranches`, `decorateCommits`). They go in a `span.prr-meta` right after the link, and each scan rebuilds it if React dropped it. A single commit's page is matched by finding a `main h1` or `.commit-title` whose text starts the message in `document.title`; if GitHub changes that header, the chips there just don't appear.
 </details>
-
-### 🗺️ Not built (yet)
-
-- Ticket hover cards
-- Per-file private notes
-- Lockfile dependency parsing
