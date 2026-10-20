@@ -42,6 +42,8 @@
       copyPermalink: true,
       checksTab: false,
       reviewButton: true,
+      pendingReviewGuard: true,
+      sinceLastLook: true,
     },
     snippets: {
       nit: "nit: ",
@@ -94,6 +96,7 @@
         { key: "whitespace", label: "Open files tab with whitespace hidden" },
         { key: "viewedAcrossPushes", label: "Viewed-state across pushes" },
         { key: "copyPermalink", label: "Copy selected lines as a quote with link", hint: "Alt+C" },
+        { key: "sinceLastLook", label: "New commits since your last look", note: "Your last look is when you last marked a file Viewed" },
       ],
     },
     {
@@ -102,6 +105,7 @@
         { key: "hideNoise", label: "Hide bot comments" },
         { key: "snippets", label: "Snippet expander", hint: ";trigger + space" },
         { key: "tickets", label: "Ticket chips" },
+        { key: "pendingReviewGuard", label: "Warn before leaving with an unsubmitted review", note: "Only when your pending review has comments" },
       ],
     },
     {
@@ -163,6 +167,7 @@
       if (now - seenAt < PR_RETENTION_MS) continue;
       GM_deleteValue(`v3:viewed:${id}`);
       GM_deleteValue(`v3:changedFilter:${id}`);
+      GM_deleteValue(`v3:lastLook:${id}`);
       delete lastSeen[id];
     }
     store.set("prLastSeen", lastSeen);
@@ -233,11 +238,12 @@
     return { owner, repo, number: Number(number), key: `${owner}/${repo}#${number}` };
   };
 
-  const fetchText = (url) =>
+  const fetchText = (url, headers = {}) =>
     new Promise((resolve) => {
       GM_xmlhttpRequest({
         method: "GET",
         url,
+        headers,
         onload: (res) => resolve(res.status < 300 ? res.responseText : null),
         onerror: () => resolve(null),
         ontimeout: () => resolve(null),
@@ -269,6 +275,49 @@
     return files;
   };
 
+  // .patch skips merge commits, so the head comes from the commits route instead: JSON when asked for it, else the page's embedded copy.
+  const commitsRoute = (text) => {
+    try {
+      return JSON.parse(text).payload?.pullRequestsCommitsRoute;
+    } catch {}
+    for (const [, json] of text.matchAll(/<script type="application\/json" data-target="react-app\.embeddedData">([\s\S]*?)<\/script>/g)) {
+      try {
+        const route = JSON.parse(json).payload?.pullRequestsCommitsRoute;
+        if (route) return route;
+      } catch {}
+    }
+    return null;
+  };
+
+  // The live-update channel name embeds the head SHA; a mismatch means the commit list is partial.
+  const channelSha = (channel) => {
+    try {
+      return JSON.parse(atob(channel.split("--")[0])).c.match(/:commit:([0-9a-f]{40})$/)?.[1] ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const parseCommitOids = (text) => {
+    const route = text ? commitsRoute(text) : null;
+    if (!route || route.truncated) return null;
+    const oids = (route.commitGroups ?? [])
+      .flatMap((group) => group.commits ?? [])
+      .map((commit) => commit.oid)
+      .filter((oid) => /^[0-9a-f]{40}$/.test(oid ?? ""));
+    const head = channelSha(route.metadata?.commitHeadShaChannel ?? "");
+    return oids.length && (!head || head === oids.at(-1)) ? oids : null;
+  };
+
+  const loadCommitOids = async (pr) =>
+    parseCommitOids(
+      await fetchText(`https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}/commits`, {
+        Accept: "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        "GitHub-Verified-Fetch": "true",
+      }),
+    );
+
   const state = {
     pr: null,
     files: null,
@@ -277,6 +326,7 @@
     hashToPath: new Map(),
     version: 0,
     loadedAt: 0,
+    commitOids: null,
   };
   const userExpanded = new Set();
   let panelOpen = store.get("panelOpen", true);
@@ -328,9 +378,10 @@
   };
 
   const loadData = async (pr) => {
-    const [diffText, codeowners] = await Promise.all([
+    const [diffText, codeowners, commitOids] = await Promise.all([
       fetchText(`https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}.diff`),
       loadCodeowners(pr),
+      config.features.sinceLastLook ? loadCommitOids(pr) : null,
     ]);
     const files = diffText?.startsWith("diff --git") ? parseDiff(diffText) : null;
     const hashToPath = new Map(
@@ -344,6 +395,7 @@
       shas: new Map((files ?? []).map((f) => [f.filename, f.sha])),
       version: state.version + 1,
       loadedAt: Date.now(),
+      commitOids,
     });
     applyChangedFilter();
     renderPanel(true);
@@ -358,6 +410,7 @@
       hashToPath: new Map(),
       loadedAt: 0,
       version: state.version + 1,
+      commitOids: null,
     });
     userExpanded.clear();
     threadCursor = -1;
@@ -509,6 +562,27 @@
   const viewedKey = () => `v3:viewed:${digest(state.pr.key)}`;
   const viewedRecords = () => store.get(viewedKey(), {});
 
+  const lastLookKey = () => `v3:lastLook:${digest(state.pr.key)}`;
+
+  const recordLastLook = () => {
+    const head = state.commitOids?.at(-1);
+    if (head) store.set(lastLookKey(), head);
+  };
+
+  const sinceLastLook = () => {
+    const oids = state.commitOids;
+    const seen = config.features.sinceLastLook && state.pr && oids ? store.get(lastLookKey(), "") : "";
+    if (!seen || seen === oids.at(-1)) return null;
+    const index = oids.indexOf(seen);
+    return { seen, head: oids.at(-1), count: oids.length - 1 - index, rewritten: index < 0 };
+  };
+
+  // A force-pushed SHA is no longer in the PR, so GitHub's PR range view 404s; a plain compare still renders.
+  const lastLookHref = ({ seen, head, rewritten }) => {
+    const { owner, repo, number } = state.pr;
+    return rewritten ? `/${owner}/${repo}/compare/${seen}..${head}` : `/${owner}/${repo}/pull/${number}/files/${seen}..${head}`;
+  };
+
   const badge = (text, tone) => h("span", { class: `prr-badge prr-${tone}` }, text);
 
   const setCollapsed = ({ el, actions }, collapsed) => {
@@ -596,6 +670,18 @@
           else delete records[digest(path)];
           store.set(viewedKey(), records);
           applyChangedFilter();
+          renderPanel(true);
+        });
+      }
+    }
+
+    if (config.features.sinceLastLook) {
+      const control = el.querySelector(VIEWED_CONTROL_SEL);
+      if (control && !control.dataset.prrLookBound) {
+        control.dataset.prrLookBound = "1";
+        onViewedChange(control, () => {
+          if (!isViewed(control)) return;
+          recordLastLook();
           renderPanel(true);
         });
       }
@@ -1150,6 +1236,36 @@
       );
     }
 
+    const look = sinceLastLook();
+    if (look) {
+      out.push(
+        inlineSection(
+          look.rewritten ? "Force-pushed since your last look" : `${look.count} new commit${look.count === 1 ? "" : "s"} since your last look`,
+          h(
+            "span",
+            { class: "prr-look" },
+            h("a", { class: "prr-chip", href: lastLookHref(look), title: `${look.seen.slice(0, 7)}..${look.head.slice(0, 7)}` }, "View changes"),
+            h(
+              "button",
+              {
+                class: "prr-btn",
+                type: "button",
+                title: "Treat the current head as seen",
+                onclick: () => {
+                  recordLastLook();
+                  renderPanel(true);
+                },
+              },
+              "Dismiss",
+            ),
+          ),
+          look.rewritten
+            ? h("div", { class: "prr-muted" }, "The commit you last saw is no longer in this PR, so this compares it directly with the new head. After a rebase that includes base-branch changes too.")
+            : null,
+        ),
+      );
+    }
+
     return out;
   };
 
@@ -1420,7 +1536,104 @@
     if (params.has("w") || sessionStorage.getItem(guard)) return;
     sessionStorage.setItem(guard, "1");
     params.set("w", "1");
+    allowLeaving();
     location.replace(`${location.pathname}?${params}`);
+  };
+
+  // Set before navigations that stay on the PR (or were already confirmed) so beforeunload doesn't prompt. The window covers goTo's 1.5s full-load fallback and slow in-app loads that end in a full load.
+  let leavingAllowedUntil = 0;
+  const allowLeaving = () => {
+    leavingAllowedUntil = Date.now() + 10_000;
+  };
+
+  const findKey = (root, key) => {
+    const stack = [root];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node || typeof node !== "object") continue;
+      if (Object.hasOwn(node, key)) return node[key];
+      for (const value of Object.values(node)) stack.push(value);
+    }
+    return undefined;
+  };
+
+  // Server state at page load, from the React payload. Only trusted when that payload was rendered for this PR.
+  const payloadPendingCount = () => {
+    const prPath = `/${state.pr.owner}/${state.pr.repo}/pull/${state.pr.number}`.toLowerCase();
+    for (const app of document.querySelectorAll("react-app[initial-path]")) {
+      const initial = app.getAttribute("initial-path").toLowerCase();
+      if (initial !== prPath && !initial.startsWith(`${prPath}/`)) continue;
+      const json = app.querySelector("script[data-target='react-app.embeddedData']")?.textContent ?? "";
+      if (!json.includes('"viewerPendingReview"')) continue;
+      try {
+        const review = findKey(JSON.parse(json), "viewerPendingReview");
+        if (review?.id) return review.comments?.length ?? 0;
+      } catch {}
+    }
+    return 0;
+  };
+
+  // Classic Files: GitHub keeps .js-pending-review-comment-count in sync. React Files: the review button's count is the pending comment count. Null when neither is on the page.
+  const livePendingCount = () => {
+    const classic = [...document.querySelectorAll(".js-pending-review-comment-count")];
+    const buttons = [...document.querySelectorAll("button[class*='ReviewMenuButton__']")];
+    if (!classic.length && !buttons.length) return null;
+    const counters = [...classic, ...buttons.map((button) => button.querySelector("[data-component='ButtonCounter']"))];
+    return Math.max(0, ...counters.map((el) => parseInt(el?.textContent ?? "", 10) || 0));
+  };
+
+  // The last value read from the page sticks, so moving to a tab without a review button keeps it.
+  const pendingReview = { key: "", count: 0 };
+
+  const pendingReviewCount = () => {
+    if (!config.features.pendingReviewGuard || !state.pr) return 0;
+    if (pendingReview.key !== state.pr.key) Object.assign(pendingReview, { key: state.pr.key, count: payloadPendingCount() });
+    const live = livePendingCount();
+    if (live !== null) pendingReview.count = live;
+    return pendingReview.count;
+  };
+
+  const prPathOf = (pathname) => pathname.match(/^\/[^/]+\/[^/]+\/pull\/\d+/)?.[0].toLowerCase() ?? "";
+
+  const leavesPr = (url) => {
+    const prPath = prPathOf(location.pathname);
+    const path = url.pathname.toLowerCase();
+    return Boolean(prPath) && path !== prPath && !path.startsWith(`${prPath}/`);
+  };
+
+  const pendingMessage = (count) =>
+    `You have a pending review with ${count} comment${count === 1 ? "" : "s"} you haven't submitted. Nobody else can see ${count === 1 ? "it" : "them"} until you submit the review.\n\nLeave this pull request anyway?`;
+
+  // Same-origin links usually navigate in-app without beforeunload, so they are confirmed here; other origins unload the page and beforeunload covers them.
+  const guardLeavingClick = (event) => {
+    if (!config.features.pendingReviewGuard || !state.pr) return;
+    const link = event.target?.closest?.("a[href]");
+    if (!link || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    if ((link.target && link.target !== "_self") || link.hasAttribute("download")) return;
+    const url = new URL(link.href, location.href);
+    if (url.origin !== location.origin) return;
+    if (!leavesPr(url)) {
+      allowLeaving();
+      return;
+    }
+    const count = pendingReviewCount();
+    if (!count) return;
+    if (confirm(pendingMessage(count))) {
+      allowLeaving();
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+
+  // Submitting from the React review dialog sets location.href before the button's count re-renders, so an open dialog means "submitting", not "leaving".
+  const reviewDialogOpen = () =>
+    Boolean(document.querySelector("#anchored-review-title, [role='dialog'][aria-label='Review changes'], dialog[aria-label='Review changes']"));
+
+  const guardUnload = (event) => {
+    if (Date.now() < leavingAllowedUntil || reviewDialogOpen() || !pendingReviewCount()) return;
+    event.preventDefault();
+    event.returnValue = "";
   };
 
   const scan = () => {
@@ -1441,6 +1654,7 @@
     processNoise();
     applyChangedFilter();
     renderPanel();
+    pendingReviewCount();
   };
 
   GM_addStyle(`
@@ -1531,6 +1745,8 @@
       border: 1px solid var(--borderColor-default, #d0d7de); border-bottom-width: 2px; background: var(--bgColor-muted, #f6f8fa); }
     body.prr-hide-noise .prr-noise { display: none !important; }
     .prr-flash { outline: 3px solid var(--borderColor-accent-emphasis, #0969da); outline-offset: 2px; }
+    .prr-look { display: flex; align-items: center; gap: 6px; flex: none; }
+    .prr-look .prr-btn { margin: 0; }
   `);
 
   GM_registerMenuCommand("Edit config (JSON)", () => {
@@ -1600,6 +1816,16 @@
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.pr && Date.now() - state.loadedAt > 60_000) loadData(state.pr);
   });
+  addEventListener("click", guardLeavingClick, true);
+  addEventListener("submit", allowLeaving, true);
+  addEventListener("beforeunload", guardUnload);
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key === "F5" || ((event.ctrlKey || event.metaKey) && event.code === "KeyR")) allowLeaving();
+    },
+    true,
+  );
 
   let filterItemQueued = false;
   const scheduleFilterItem = () => {

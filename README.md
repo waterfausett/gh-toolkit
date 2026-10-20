@@ -20,10 +20,11 @@ If the Linear and ADO ticket chips don't link as expected, see `ticketRules` and
 
 ## How data is loaded
 
-Two requests per PR, made by Tampermonkey with your GitHub session cookies:
+Up to three requests per PR, made by Tampermonkey with your GitHub session cookies:
 
 - `/<owner>/<repo>/pull/<n>.diff` for the file list, per-file additions and deletions, and blob SHAs (from the diff's `index` lines).
 - `/<owner>/<repo>/raw/HEAD/.github/CODEOWNERS` (falling back to `CODEOWNERS` and `docs/CODEOWNERS`) for ownership.
+- `/<owner>/<repo>/pull/<n>/commits` with `Accept: application/json` for the PR's commit list and head SHA (only while "New commits since your last look" is on). This is roughly 2 KB per commit.
 
 If either fails (signed out, SSO expired, very large PR where GitHub refuses to render the diff), the panel says so and the features that depend on it switch off. Everything that only reads the page keeps working.
 
@@ -47,6 +48,8 @@ If either fails (signed out, SSO expired, very large PR where GitHub refuses to 
 | Hide bot comments | Conversation tab timeline items authored by bots. |
 | Snippet expander | Type `;nit` then space in any comment box. Defaults: `;nit`, `;q`, `;block`, `;lgtm`, `;test`, `;why`. Edit via **Edit config (JSON)**. |
 | Whitespace hidden by default | Off by default. Redirects to `?w=1` once per tab per PR, and never when the URL already has a `w` parameter. |
+| Warn before leaving with an unsubmitted review | If your pending review has comments, closing the tab, reloading or following a link off the PR asks first. Same-site links that leave the PR (another PR, issues, a file view) get a `confirm()`; anything else that unloads the page gets the browser's own "Leave site?" prompt. Moving between the PR's own tabs, clicking Submit in the review dialog, and F5 / Ctrl+R don't prompt (the browser's reload button does). A pending review with no comments, or your submitted comments, never count. Browser back/forward inside GitHub's app is not caught, and nor is closing the tab within 10s of clicking a link inside the PR. |
+| New commits since your last look | Your last look is the PR's head commit when you last marked a file Viewed. When the head has moved since, the panel shows "N new commits since your last look" with **View changes**, which opens GitHub's own range view (`/pull/<n>/files/<old>..<new>`). After a force-push the old commit isn't in the PR and that view 404s, so it links to `/compare/<old>..<new>` instead and says so. **Dismiss** marks the current head as seen. |
 
 Every feature has a toggle in the settings modal, opened with the ⚙ in the panel bar or Alt+, (grouped, with a Reset to defaults button). **Edit config (JSON)** and **Reset config** are in the Tampermonkey menu; only settings you change are stored.
 
@@ -57,5 +60,9 @@ GitHub's DOM changes. Per-file features anchor on each file container's `id="dif
 The filter row is injected into the React `ActionMenu` that the tree's filter button opens (`[data-component="ActionMenu.Overlay"]`), cloned from its `li[role="menuitemcheckbox"]` whose label is "Viewed files". If GitHub renames that label or restructures the menu, `injectFilterItem` stops adding the row.
 
 Viewed state is read from each file's Viewed control (`VIEWED_CONTROL_SEL`): the classic checkbox, or the newer diff's `button[aria-pressed][aria-label*="viewed"]`. Viewed-state across pushes and Alt+N both depend on it. Alt+C reads line numbers from `[data-line-number]` cells inside the selection's `<tr>` rows (`rowLine`, `selectedRows`), which is verified against the classic diff markup; the newer diff view may fall back to a link without line numbers.
+
+The pending-review warning reads the count from GitHub's own review button: in the React Files view, the `[data-component="ButtonCounter"]` inside `button[class*="ReviewMenuButton__"]` (Primer's `count` prop, set to the number of pending comments); in the classic view, `.js-pending-review-comment-count`. On a fresh load it also reads `viewerPendingReview` from the React payload (`react-app[initial-path]` → `script[data-target="react-app.embeddedData"]`), used only when that payload was rendered for the current PR. The last count seen sticks while you're on a tab without the button. Submitting from the React dialog sets `location.href` before the count re-renders, so beforeunload stays quiet while `#anchored-review-title` (the review overlay's heading) is on the page. See `livePendingCount`, `payloadPendingCount` and `reviewDialogOpen`.
+
+"New commits since your last look" reads `payload.pullRequestsCommitsRoute.commitGroups[].commits[].oid` from the commits route (with a fallback that parses the same payload out of the HTML page) and cross-checks the last commit against the SHA embedded in `metadata.commitHeadShaChannel`. If the route is truncated or the two disagree, the feature shows nothing. `.patch` isn't used because it leaves out merge commits, so its last commit isn't the head after a "Merge main into …" push. See `parseCommitOids`.
 
 Not built: whitespace-only change detection, ticket hover cards, per-file private notes.
