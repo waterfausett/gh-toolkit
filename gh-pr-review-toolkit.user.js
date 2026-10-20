@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.11.3
+// @version      0.11.4
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -756,12 +756,6 @@
     return rule.owners.some((owner) => mine.has(owner));
   };
 
-  const ownershipMode = () => {
-    if (!config.features.ownership) return "off";
-    const saved = store.get("ownershipMode", "mark");
-    return saved === "hide" ? saved : "mark";
-  };
-
   const viewedKey = () => `v3:viewed:${digest(state.pr.key)}`;
   const viewedRecords = () => store.get(viewedKey(), {});
 
@@ -937,22 +931,19 @@
 
   const processTree = () => {
     const dimTests = config.features.dimTestsInTree;
-    const ownership = ownershipMode();
+    const ownership = config.features.ownership;
     const changedPaths = config.features.viewedAcrossPushes && state.pr ? changedSinceViewed() : [];
     const filterByChanged = changedFilterActive();
     for (const item of document.querySelectorAll("[role='tree'] [role='treeitem']")) {
       const folder = isTreeFolder(item);
-      const path = dimTests || ownership !== "off" || changedPaths.length ? treePath(item) : "";
+      const path = dimTests || ownership || changedPaths.length ? treePath(item) : "";
       const isTest = dimTests && categoryOf(folder ? `${path}/_` : path) === "tests";
-      const notMine = ownership !== "off" && !folder && isMine(path) === false;
+      const notMine = ownership && !folder && isMine(path) === false;
       item.classList.toggle("prr-tree-dim", isTest);
-      item.classList.toggle("prr-tree-notmine", notMine && ownership === "mark");
-      setTreeMark(item, "notmine", "Not mine (CODEOWNERS)", notMine && ownership === "mark");
+      item.classList.toggle("prr-tree-notmine", notMine);
+      setTreeMark(item, "notmine", "Not mine (CODEOWNERS)", notMine);
       setTreeMark(item, "changed", "Changed since you viewed it", !folder && changedPaths.includes(path));
-      item.classList.toggle(
-        "prr-tree-hide",
-        (notMine && ownership === "hide") || (filterByChanged && outsideChangedSet(path, folder, changedPaths)),
-      );
+      item.classList.toggle("prr-tree-hide", filterByChanged && outsideChangedSet(path, folder, changedPaths));
     }
   };
 
@@ -1301,7 +1292,6 @@
     const elements = new Map(fileEntries().map(({ el, path }) => [path, el]));
     const changed = config.features.viewedAcrossPushes && state.pr ? new Set(changedSinceViewed()) : new Set();
     const records = state.pr ? viewedRecords() : {};
-    const ownership = ownershipMode();
     return knownPaths().map((path) => {
       const control = elements.get(path)?.querySelector(VIEWED_CONTROL_SEL);
       const sha = state.shas.get(path);
@@ -1311,7 +1301,7 @@
         file: stats.get(path),
         viewed: control ? isViewed(control) : Boolean(sha) && records[digest(path)] === sha,
         changed: changed.has(path),
-        notMine: ownership !== "off" && isMine(path) === false,
+        notMine: config.features.ownership && isMine(path) === false,
         tag: category === "generated" || category === "tests" ? category : "",
       };
     });
@@ -1768,7 +1758,7 @@
   const progressScope = () => (store.get("progressScope", "mine") === "all" ? "all" : "mine");
 
   const reviewProgress = (live, records, all = progressScope() === "all") => {
-    const ownership = ownershipMode() !== "off";
+    const ownership = config.features.ownership;
     const p = { files: 0, viewedFiles: 0, lines: 0, viewedLines: 0, generated: 0, notMine: 0 };
     for (const { filename, additions, deletions } of state.files) {
       const reason = isGenerated(filename) ? "generated" : ownership && isMine(filename) === false ? "notMine" : null;
@@ -1788,7 +1778,7 @@
   const BULK_GROUPS = [
     { label: "Generated", test: (path) => isGenerated(path) },
     { label: "Tests", test: (path) => categoryOf(path) === "tests" },
-    { label: "Not mine", test: (path) => ownershipMode() !== "off" && isMine(path) === false },
+    { label: "Not mine", test: (path) => config.features.ownership && isMine(path) === false },
   ];
   const BULK_CLICK_GAP_MS = 150;
   let bulkRunning = false;
@@ -2133,36 +2123,6 @@
       }
     }
 
-    if (config.features.ownership && FILES_PATH.test(location.pathname) && (state.codeowners || config.minePatterns.length)) {
-      const verdicts = knownPaths().map(isMine);
-      const mode = ownershipMode();
-      out.push(
-        inlineSection(
-          "Ownership",
-          h(
-            "span",
-            { class: "prr-seg" },
-            ...["mark", "hide"].map((option) =>
-              h(
-                "button",
-                {
-                  class: `prr-btn${option === mode ? " prr-on" : ""}`,
-                  type: "button",
-                  onclick: () => {
-                    store.set("ownershipMode", option);
-                    processTree();
-                    renderPanel(true);
-                  },
-                },
-                option,
-              ),
-            ),
-          ),
-          h("div", { class: "prr-muted" }, `Mine ${verdicts.filter((v) => v === true).length} · Not mine ${verdicts.filter((v) => v === false).length} (● in the file tree)`),
-        ),
-      );
-    }
-
     // The meter is a summary, so it goes first.
     if (reviewSnapshot?.progress) out.unshift(progressSection(reviewSnapshot.progress));
     if (reviewSnapshot?.bulk?.some(Boolean)) out.push(bulkSection(reviewSnapshot.bulk));
@@ -2480,7 +2440,6 @@
       document.querySelectorAll(".prr-noise").length,
       document.body.classList.contains("prr-hide-noise"),
       panelOpen,
-      ownershipMode(),
       config.features.tickets ? ticketMatches().map(([id, url]) => id + url).join() : "",
       location.pathname,
       reviewSnapshot,
