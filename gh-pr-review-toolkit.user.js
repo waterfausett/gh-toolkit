@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.11.4
+// @version      0.12.1
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -51,6 +51,8 @@
       depSummary: true,
       pendingReviewGuard: true,
       sinceLastLook: true,
+      listBadges: true,
+      ticketsElsewhere: true,
     },
     snippets: {
       nit: "nit: ",
@@ -142,6 +144,13 @@
         { key: "depSummary", label: "Dependency changes", note: "package.json, requirements*.txt, pyproject.toml" },
       ],
     },
+    {
+      title: "Elsewhere on GitHub",
+      features: [
+        { key: "listBadges", label: "Review badges in PR lists", note: "Your progress, new commits and unsubmitted reviews, as of your last visit" },
+        { key: "ticketsElsewhere", label: "Ticket chips in lists, branches and commits" },
+      ],
+    },
   ];
 
   const store = {
@@ -195,9 +204,12 @@
       GM_deleteValue(`v3:viewed:${id}`);
       GM_deleteValue(`v3:changedFilter:${id}`);
       GM_deleteValue(`v3:lastLook:${id}`);
+      GM_deleteValue(`v3:summary:${id}`);
       delete lastSeen[id];
     }
     store.set("prLastSeen", lastSeen);
+    const pending = store.get("pendingReviews", {});
+    store.set("pendingReviews", Object.fromEntries(Object.entries(pending).filter(([, entry]) => now - entry.at < PR_RETENTION_MS)));
     store.set("lastPrunedAt", now);
   };
 
@@ -759,24 +771,23 @@
   const viewedKey = () => `v3:viewed:${digest(state.pr.key)}`;
   const viewedRecords = () => store.get(viewedKey(), {});
 
-  const lastLookKey = () => `v3:lastLook:${digest(state.pr.key)}`;
+  const lastLookKey = (pr = state.pr) => `v3:lastLook:${digest(pr.key)}`;
 
   const recordLastLook = () => {
     const head = state.commitOids?.at(-1);
     if (head) store.set(lastLookKey(), head);
   };
 
-  const sinceLastLook = () => {
-    const oids = state.commitOids;
-    const seen = config.features.sinceLastLook && state.pr && oids ? store.get(lastLookKey(), "") : "";
+  const sinceLastLook = (pr = state.pr, oids = state.commitOids) => {
+    const seen = config.features.sinceLastLook && pr && oids ? store.get(lastLookKey(pr), "") : "";
     if (!seen || seen === oids.at(-1)) return null;
     const index = oids.indexOf(seen);
     return { seen, head: oids.at(-1), count: oids.length - 1 - index, rewritten: index < 0 };
   };
 
   // A force-pushed SHA is no longer in the PR, so GitHub's PR range view 404s; a plain compare still renders.
-  const lastLookHref = ({ seen, head, rewritten }) => {
-    const { owner, repo, number } = state.pr;
+  const lastLookHref = ({ seen, head, rewritten }, pr = state.pr) => {
+    const { owner, repo, number } = pr;
     return rewritten ? `/${owner}/${repo}/compare/${seen}..${head}` : `/${owner}/${repo}/pull/${number}/files/${seen}..${head}`;
   };
 
@@ -1611,14 +1622,16 @@
     return base ?? store.get("adoBase", "");
   };
 
-  const ticketMatches = () => {
-    const sources = [
-      { text: document.title },
-      { text: document.querySelector(".js-issue-title")?.textContent },
-      ...[...document.querySelectorAll(".head-ref, [class*='head-ref'], a[href*='/tree/']")]
-        .slice(0, 3)
-        .map((el) => ({ text: el.textContent, branch: true })),
-    ].filter((source) => source.text);
+  const prTicketSources = () => [
+    { text: document.title },
+    { text: document.querySelector(".js-issue-title")?.textContent },
+    ...[...document.querySelectorAll(".head-ref, [class*='head-ref'], a[href*='/tree/']")]
+      .slice(0, 3)
+      .map((el) => ({ text: el.textContent, branch: true })),
+  ];
+
+  const ticketMatches = (allSources = prTicketSources()) => {
+    const sources = allSources.filter((source) => source.text);
     const ignored = new Set(config.ticketIgnorePrefixes);
     const seen = new Map();
     for (const { pattern, url, branchIgnoreCase, ado } of config.ticketRules) {
@@ -1785,6 +1798,22 @@
   let reviewSnapshot = null;
 
   const liveViewed = (controls) => new Map([...controls].map(([path, control]) => [path, isViewed(control)]));
+
+  const summaryKey = (pr) => `v3:summary:${digest(pr.key)}`;
+
+  // PR lists only have the stored records to go on, which lack line counts, so each visit leaves a small summary behind.
+  const saveSummary = (snapshot) => {
+    if (!config.features.listBadges || !state.files?.length) return;
+    const records = viewedRecords();
+    if (!Object.keys(records).length) {
+      if (store.get(summaryKey(state.pr))) GM_deleteValue(summaryKey(state.pr));
+      return;
+    }
+    const [mine, all] =
+      snapshot?.progressBoth ?? [false, true].map((everything) => reviewProgress(liveViewed(viewedControls()), records, everything));
+    const summary = { mine: mine.pct, all: all.pct, mineFiles: mine.files, files: all.files, viewedFiles: all.viewedFiles };
+    if (JSON.stringify(store.get(summaryKey(state.pr))) !== JSON.stringify(summary)) store.set(summaryKey(state.pr), summary);
+  };
 
   const reviewData = () => {
     if (!state.files || (!panelOpen && !(config.features.reviewProgress && FILES_PATH.test(location.pathname)))) return null;
@@ -2252,14 +2281,12 @@
     }, 1500);
   };
 
-  const ticketChips = () =>
-    config.features.tickets
-      ? ticketMatches().map(([id, url]) =>
-          url
-            ? h("a", { class: "prr-chip", href: url, target: "_blank", rel: "noreferrer", title: `Open ${id}` }, id)
-            : h("span", { class: "prr-chip", title: "No link known for this ticket; see adoBase in the config" }, id),
-        )
-      : [];
+  const ticketChip = ([id, url]) =>
+    url
+      ? h("a", { class: "prr-chip", href: url, target: "_blank", rel: "noreferrer", title: `Open ${id}` }, id)
+      : h("span", { class: "prr-chip", title: "No link known for this ticket; see adoBase in the config" }, id);
+
+  const ticketChips = () => (config.features.tickets ? ticketMatches().map(ticketChip) : []);
 
   const ticketRow = () => {
     const chips = ticketChips();
@@ -2434,6 +2461,7 @@
     if (!state.pr) return;
     reviewSnapshot = reviewData();
     placeInlineIndicators(reviewSnapshot);
+    saveSummary(reviewSnapshot);
     const signature = JSON.stringify([
       state.version,
       unresolvedThreads().length,
@@ -2513,7 +2541,7 @@
     return undefined;
   };
 
-  // Server state at page load, from the React payload. Only trusted when that payload was rendered for this PR.
+  // Server state at page load, from the React payload. Only trusted when that payload was rendered for this PR; null when it says nothing.
   const payloadPendingCount = () => {
     const prPath = `/${state.pr.owner}/${state.pr.repo}/pull/${state.pr.number}`.toLowerCase();
     for (const app of document.querySelectorAll("react-app[initial-path]")) {
@@ -2523,10 +2551,10 @@
       if (!json.includes('"viewerPendingReview"')) continue;
       try {
         const review = findKey(JSON.parse(json), "viewerPendingReview");
-        if (review?.id) return review.comments?.length ?? 0;
+        return review?.id ? (review.comments?.length ?? 0) : 0;
       } catch {}
     }
-    return 0;
+    return null;
   };
 
   // Classic Files: GitHub keeps .js-pending-review-comment-count in sync. React Files: the review button's count is the pending comment count. Null when neither is on the page.
@@ -2539,14 +2567,36 @@
   };
 
   // The last value read from the page sticks, so moving to a tab without a review button keeps it.
-  const pendingReview = { key: "", count: 0 };
+  const pendingReview = { key: "", count: 0, known: false };
 
-  const pendingReviewCount = () => {
-    if (!config.features.pendingReviewGuard || !state.pr) return 0;
-    if (pendingReview.key !== state.pr.key) Object.assign(pendingReview, { key: state.pr.key, count: payloadPendingCount() });
+  const pendingReviewCount = () => (config.features.pendingReviewGuard ? currentPendingCount() : 0);
+
+  const currentPendingCount = () => {
+    if (!state.pr) return 0;
+    if (pendingReview.key !== state.pr.key) {
+      const payload = payloadPendingCount();
+      Object.assign(pendingReview, { key: state.pr.key, count: payload ?? 0, known: payload !== null });
+    }
     const live = livePendingCount();
-    if (live !== null) pendingReview.count = live;
+    if (live !== null) Object.assign(pendingReview, { count: live, known: true });
     return pendingReview.count;
+  };
+
+  // Stored under the plain PR key (unlike the hashed per-PR keys) so lists can name PRs that aren't on the current page; an entry only lives while a review is pending.
+  const savePendingReview = () => {
+    if (!config.features.listBadges || !state.pr) return;
+    const count = currentPendingCount();
+    const pending = store.get("pendingReviews", {});
+    const entry = pending[state.pr.key];
+    if (!count) {
+      if (!entry || !pendingReview.known) return;
+      delete pending[state.pr.key];
+    } else {
+      if (entry?.count === count && Date.now() - entry.at < DAY_MS) return;
+      const title = document.title.split(" · ")[0].replace(/ by [\w-]+$/, "").trim();
+      pending[state.pr.key] = { count, title: title || entry?.title || "", at: Date.now() };
+    }
+    store.set("pendingReviews", pending);
   };
 
   const prPathOf = (pathname) => pathname.match(/^\/[^/]+\/[^/]+\/pull\/\d+/)?.[0].toLowerCase() ?? "";
@@ -2592,11 +2642,180 @@
     event.returnValue = "";
   };
 
+  const LIST_PAGE = /^\/(pulls|issues|search)(\/|$)|^\/[^/]+\/[^/]+\/(pulls|issues)(\/|$)/;
+  const PR_HREF = /^(?:https:\/\/github\.com)?\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/;
+  const OIDS_TTL_MS = 5 * 60_000;
+  const OIDS_PARALLEL = 4;
+  const oidsCache = new Map();
+  const oidsQueue = [];
+  let oidsInFlight = 0;
+
+  const pumpOids = () => {
+    while (oidsInFlight < OIDS_PARALLEL && oidsQueue.length) {
+      const pr = oidsQueue.shift();
+      oidsInFlight += 1;
+      loadCommitOids(pr).then((oids) => {
+        oidsCache.set(pr.key, { oids, at: Date.now() });
+        oidsInFlight -= 1;
+        pumpOids();
+        decorateElsewhere();
+      });
+    }
+  };
+
+  // Only PRs with a recorded last look are fetched, so a list of PRs you never reviewed costs nothing.
+  const cachedOids = (pr) => {
+    const hit = oidsCache.get(pr.key);
+    if (hit && (hit.pending || Date.now() - hit.at < OIDS_TTL_MS)) return hit.oids ?? null;
+    oidsCache.set(pr.key, { ...hit, pending: true });
+    oidsQueue.push(pr);
+    pumpOids();
+    return hit?.oids ?? null;
+  };
+
+  const listBadges = (pr) => {
+    const summary = store.get(summaryKey(pr));
+    const look = config.features.sinceLastLook && store.get(lastLookKey(pr)) ? sinceLastLook(pr, cachedOids(pr)) : null;
+    const badges = [];
+    if (summary) {
+      const scoped = summary.mineFiles > 0 && summary.mineFiles < summary.files;
+      const pct = scoped ? summary.mine : summary.all;
+      const share = scoped ? `${summary.mine}% of your lines, ${summary.all}% of all` : `${summary.all}% of lines`;
+      const title = `${summary.viewedFiles}/${summary.files} files viewed · ${share} (as of your last visit)`;
+      badges.push(h("span", { class: `prr-badge ${pct >= 100 ? "prr-done" : "prr-muted"}`, title }, pct >= 100 ? "✓ reviewed" : `${pct}% reviewed`));
+    }
+    const pending = store.get("pendingReviews", {})[pr.key];
+    if (pending) {
+      const title = `Your unsubmitted review has ${pending.count} comment${pending.count === 1 ? "" : "s"} (as of your last visit)`;
+      const href = `/${pr.owner}/${pr.repo}/pull/${pr.number}/files`;
+      badges.push(h("a", { class: "prr-badge prr-warn", href, title }, `✎ ${pending.count} unsubmitted`));
+    }
+    if (look) {
+      const text = look.rewritten ? "force-pushed" : `${look.count} new commit${look.count === 1 ? "" : "s"}`;
+      const title = `Since your last look: ${look.seen.slice(0, 7)}..${look.head.slice(0, 7)}`;
+      badges.push(h("a", { class: "prr-badge prr-new", href: lastLookHref(look, pr), title }, text));
+    }
+    return badges;
+  };
+
+  // React may re-render the host and drop our node, so each pass compares what it would insert with what is there.
+  const placeMeta = (anchor, kids) => {
+    const existing = anchor.nextElementSibling?.classList.contains("prr-meta") ? anchor.nextElementSibling : null;
+    if (!kids.length) {
+      existing?.remove();
+      return;
+    }
+    const meta = h("span", { class: "prr-meta" }, ...kids);
+    if (existing?.innerHTML === meta.innerHTML) return;
+    if (existing) existing.replaceWith(meta);
+    else anchor.after(meta);
+  };
+
+  const elsewhereTickets = (sources) =>
+    config.features.tickets && config.features.ticketsElsewhere ? ticketMatches(sources).map(ticketChip) : [];
+
+  const decoratePrLinks = () => {
+    if (!LIST_PAGE.test(location.pathname) || !(config.features.listBadges || config.features.ticketsElsewhere)) return;
+    for (const anchor of document.querySelectorAll("a[data-hovercard-type='pull_request'], a.js-navigation-open[href*='/pull/']")) {
+      const m = anchor.getAttribute("href")?.match(PR_HREF);
+      if (!m || !anchor.textContent.trim() || anchor.closest(".comment-body, .markdown-body, .prr-meta")) continue;
+      const [, owner, repo, number] = m;
+      const pr = { owner, repo, number: Number(number), key: `${owner}/${repo}#${number}` };
+      placeMeta(anchor, [...(config.features.listBadges ? listBadges(pr) : []), ...elsewhereTickets([{ text: anchor.textContent }])]);
+    }
+  };
+
+  const BRANCHES_PAGE = /^\/([^/]+)\/([^/]+)\/branches(\/|$)/;
+  const COMMITS_PAGE = /^\/([^/]+)\/([^/]+)\/(commits|commit)(\/|$)/;
+  const SHA_TEXT = /^[0-9a-f]{7,40}$/i;
+
+  const decorateBranches = () => {
+    const m = location.pathname.match(BRANCHES_PAGE);
+    if (!m) return;
+    const prefix = `/${m[1]}/${m[2]}/tree/`;
+    for (const anchor of document.querySelectorAll(`a[href^="${prefix}"]`)) {
+      const name = decodeURIComponent(anchor.getAttribute("href").slice(prefix.length));
+      if (anchor.textContent.trim() !== name) continue;
+      placeMeta(anchor, elsewhereTickets([{ text: name, branch: true }]));
+    }
+  };
+
+  const decorateCommits = () => {
+    const m = location.pathname.match(COMMITS_PAGE);
+    if (!m) return;
+    for (const anchor of document.querySelectorAll(`a[href^="/${m[1]}/${m[2]}/commit/"]`)) {
+      const text = anchor.textContent.trim();
+      if (!text || SHA_TEXT.test(text) || anchor.closest(".prr-meta")) continue;
+      placeMeta(anchor, elsewhereTickets([{ text }]));
+    }
+    // A single commit's page shows its message as plain text; GitHub also puts it at the front of the document title.
+    if (m[3] !== "commit") return;
+    const message = document.title.split(" · ")[0].trim();
+    const heading = [...document.querySelectorAll("main h1, main .commit-title")].find(
+      (el) => el.textContent.trim() && message.startsWith(el.textContent.trim().slice(0, 40)),
+    );
+    if (heading) placeMeta(heading, elsewhereTickets([{ text: message }]));
+  };
+
+  let pendingListOpen = false;
+
+  const placePendingList = () => {
+    const entries = Object.entries(store.get("pendingReviews", {})).sort(([, a], [, b]) => b.at - a.at);
+    const existing = document.getElementById("prr-pending");
+    if (!config.features.listBadges || !LIST_PAGE.test(location.pathname) || !entries.length) {
+      existing?.remove();
+      return;
+    }
+    const signature = JSON.stringify([entries, pendingListOpen]);
+    if (existing?.dataset.signature === signature) return;
+    const toggle = () => {
+      pendingListOpen = !pendingListOpen;
+      placePendingList();
+    };
+    const box = h(
+      "div",
+      { id: "prr-pending", class: pendingListOpen ? "" : "prr-closed", "data-signature": signature },
+      h("button", { class: "prr-btn prr-pending-toggle", type: "button", onclick: toggle }, `✎ ${entries.length} unsubmitted review${entries.length === 1 ? "" : "s"}`),
+      pendingListOpen
+        ? h(
+            "div",
+            { class: "prr-pending-list" },
+            ...entries.map(([key, { count, title }]) => {
+              const [, owner, repo, number] = key.match(/^([^/]+)\/([^#]+)#(\d+)$/);
+              return h(
+                "a",
+                { class: "prr-pending-row", href: `/${owner}/${repo}/pull/${number}/files`, title: `${count} pending comment${count === 1 ? "" : "s"}` },
+                h("span", { class: "prr-block" }, title || key),
+                h("span", { class: "prr-muted" }, `${key} · ${count}`),
+              );
+            }),
+            h("div", { class: "prr-muted prr-pending-note" }, "As of your last visit to each PR. Submitted elsewhere? Open the PR once to clear it."),
+          )
+        : null,
+    );
+    if (existing) existing.replaceWith(box);
+    else document.body.append(box);
+  };
+
+  const decorateElsewhere = () => {
+    if (state.pr) {
+      document.getElementById("prr-pending")?.remove();
+      return;
+    }
+    placePendingList();
+    decoratePrLinks();
+    if (config.features.tickets && config.features.ticketsElsewhere) {
+      decorateBranches();
+      decorateCommits();
+    }
+  };
+
   const scan = () => {
     const pr = prContext();
     if (!pr) {
       document.getElementById("prr-panel")?.remove();
       state.pr = null;
+      decorateElsewhere();
       return;
     }
     if (pr.key !== state.pr?.key) {
@@ -2611,6 +2830,7 @@
     applyChangedFilter();
     renderPanel();
     pendingReviewCount();
+    savePendingReview();
   };
 
   GM_addStyle(`
@@ -2665,6 +2885,22 @@
       white-space: nowrap; color: var(--fgColor-muted, #656d76); font-variant-numeric: tabular-nums; }
     .prr-inline-leftovers { margin: 0 8px 0 0; border: 0; font-family: inherit; cursor: pointer; }
     .prr-inline-leftovers:hover { text-decoration: underline; }
+    .prr-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-left: 6px; vertical-align: middle;
+      font-size: 11px; font-weight: 400; line-height: 16px; }
+    .prr-meta .prr-badge { margin-right: 0; text-decoration: none; }
+    .prr-meta .prr-chip { padding: 0 6px; }
+    #prr-pending { position: fixed; right: 16px; bottom: 16px; z-index: 90; width: 320px; max-height: 60vh; overflow: auto; font-size: 12px;
+      line-height: 1.5; background: var(--overlay-bgColor, var(--bgColor-default, #fff)); color: var(--fgColor-default, #1f2328);
+      border: 1px solid var(--borderColor-default, #d0d7de); border-radius: 12px; box-shadow: var(--shadow-floating-large, 0 8px 24px rgba(140,149,159,.2)); }
+    #prr-pending.prr-closed { width: auto; }
+    #prr-pending .prr-pending-toggle { margin: 6px; border-color: transparent; background: transparent; font-weight: 500; }
+    .prr-pending-list { border-top: 1px solid var(--borderColor-muted, #d8dee4); padding: 4px 0; }
+    .prr-pending-row { display: block; padding: 4px 14px; color: inherit; text-decoration: none; }
+    .prr-pending-row:hover { background: var(--control-bgColor-hover, #eaeef2); text-decoration: none; }
+    .prr-pending-note { padding: 6px 14px 4px; font-size: 11px; }
+    .prr-done { background: var(--bgColor-success-muted, #dafbe1); color: var(--fgColor-success, #1a7f37); }
+    a.prr-new { background: var(--bgColor-accent-muted, #ddf4ff); color: var(--fgColor-accent, #0969da); }
+    a.prr-new:hover { text-decoration: underline; }
     .prr-warn { background: var(--bgColor-attention-muted, #fff8c5); color: var(--fgColor-attention, #9a6700); }
     .prr-tree-dim > div { opacity: .55; }
     .prr-on { font-weight: 600; background: var(--bgColor-accent-muted, #ddf4ff); }
