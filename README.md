@@ -47,6 +47,8 @@ If either fails (signed out, SSO expired, very large PR where GitHub refuses to 
 | Hide bot comments | Conversation tab timeline items authored by bots. |
 | Snippet expander | Type `;nit` then space in any comment box. Defaults: `;nit`, `;q`, `;block`, `;lgtm`, `;test`, `;why`. Edit via **Edit config (JSON)**. |
 | Whitespace hidden by default | Off by default. Redirects to `?w=1` once per tab per PR, and never when the URL already has a `w` parameter. |
+| Review progress meter | Top of the panel on every PR tab: a bar plus `62% · 9/14 files · 410/660 lines`. The percentage is weighted by changed lines (additions + deletions). By default generated files and files owned by others (CODEOWNERS, when ownership is on) are left out and listed as "excl. 3 generated, 5 not yours"; **mine / all** switches scope (remembered across PRs). On the Files tab a file's own Viewed control decides. Elsewhere, and for files GitHub hasn't rendered, a file counts as viewed only if the blob SHA recorded when you ticked it matches the current one. The Files tab also brings those records in line with what GitHub shows, so files ticked before installing or on another machine count after one visit to Files. |
+| Bulk mark viewed | Files tab only. **Mark viewed** buttons for generated, test and not-mine files, each showing how many are still unviewed (hidden at 0). They click GitHub's own Viewed controls, 150ms apart, so GitHub saves the state. Files GitHub hasn't rendered yet have no control; the toast says how many were skipped ("Marked 7 viewed; 3 not loaded yet — scroll down and run again"). |
 
 Every feature has a toggle in the settings modal, opened with the ⚙ in the panel bar or Alt+, (grouped, with a Reset to defaults button). **Edit config (JSON)** and **Reset config** are in the Tampermonkey menu; only settings you change are stored.
 
@@ -57,5 +59,7 @@ GitHub's DOM changes. Per-file features anchor on each file container's `id="dif
 The filter row is injected into the React `ActionMenu` that the tree's filter button opens (`[data-component="ActionMenu.Overlay"]`), cloned from its `li[role="menuitemcheckbox"]` whose label is "Viewed files". If GitHub renames that label or restructures the menu, `injectFilterItem` stops adding the row.
 
 Viewed state is read from each file's Viewed control (`VIEWED_CONTROL_SEL`): the classic checkbox, or the newer diff's `button[aria-pressed][aria-label*="viewed"]`. Viewed-state across pushes and Alt+N both depend on it. Alt+C reads line numbers from `[data-line-number]` cells inside the selection's `<tr>` rows (`rowLine`, `selectedRows`), which is verified against the classic diff markup; the newer diff view may fall back to a link without line numbers.
+
+The progress meter and bulk mark viewed use the same Viewed controls (`viewedControls`, which keeps only the innermost `fileEntries` so a wrapper around several files doesn't borrow the first file's control). The SHA records they read are written by the Viewed listener in `processFile`, which runs while either Viewed-state across pushes or the progress meter is on, and by `syncViewedRecords` on the Files tab. If the meter stops moving when you tick files, check that the listener still binds.
 
 Not built: whitespace-only change detection, ticket hover cards, per-file private notes.
