@@ -42,6 +42,8 @@
       copyPermalink: true,
       checksTab: false,
       reviewButton: true,
+      reviewProgress: true,
+      bulkViewed: true,
     },
     snippets: {
       nit: "nit: ",
@@ -109,6 +111,8 @@
       features: [
         { key: "stats", label: "Change stats" },
         { key: "checksTab", label: "Checks nav item opens the Checks tab", note: "Off: scrolls to the checks summary on Conversation" },
+        { key: "reviewProgress", label: "Review progress meter", note: "Weighted by changed lines; skips generated files and files owned by others" },
+        { key: "bulkViewed", label: "Bulk mark viewed buttons", note: "Generated, test and not-mine files; Files tab only" },
       ],
     },
   ];
@@ -586,6 +590,10 @@
       if (recorded && current && recorded !== current) {
         actions.prepend(badge("changed since you viewed it", "warn"));
       }
+    }
+
+    // The progress meter reads these records off the Files tab, so they are kept while either feature is on.
+    if (config.features.viewedAcrossPushes || config.features.reviewProgress) {
       const control = el.querySelector(VIEWED_CONTROL_SEL);
       if (control && !control.dataset.prrBound) {
         control.dataset.prrBound = "1";
@@ -675,11 +683,11 @@
     setTimeout(() => el.classList.remove("prr-flash"), 1500);
   };
 
-  const toast = (message) => {
+  const toast = (message, ms = 2000) => {
     document.getElementById("prr-toast")?.remove();
     const el = h("div", { id: "prr-toast" }, message);
     document.body.append(el);
-    setTimeout(() => el.remove(), 2000);
+    setTimeout(() => el.remove(), ms);
   };
 
   const stepThread = (direction) => {
@@ -1014,6 +1022,183 @@
     if (item.getAttribute("aria-checked") !== active) item.setAttribute("aria-checked", active);
   };
 
+  const viewedControls = () => {
+    const controls = new Map();
+    if (!FILES_PATH.test(location.pathname)) return controls;
+    const entries = fileEntries();
+    for (const { el, path } of entries) {
+      // fileEntries can return a wrapper around several files; only the innermost entries are single files.
+      if (entries.some((other) => other.el !== el && el.contains(other.el))) continue;
+      const control = el.querySelector(VIEWED_CONTROL_SEL);
+      if (control) controls.set(path, control);
+    }
+    return controls;
+  };
+
+  // GitHub unticks a file when it changes, so a ticked control means the current SHA was viewed. Records of an older SHA are left alone: that is "changed since viewed".
+  const syncViewedRecords = (live) => {
+    const records = viewedRecords();
+    let dirty = false;
+    for (const [path, viewed] of live) {
+      const sha = state.shas.get(path);
+      const key = digest(path);
+      if (!sha || viewed === (records[key] === sha)) continue;
+      if (viewed) records[key] = sha;
+      else delete records[key];
+      dirty = true;
+    }
+    if (dirty) store.set(viewedKey(), records);
+  };
+
+  const isViewedNow = (path, live, records) => {
+    const sha = state.shas.get(path);
+    return live.get(path) ?? (Boolean(sha) && records[digest(path)] === sha);
+  };
+
+  const progressScope = () => (store.get("progressScope", "mine") === "all" ? "all" : "mine");
+
+  const reviewProgress = (live, records) => {
+    const all = progressScope() === "all";
+    const ownership = ownershipMode() !== "off";
+    const p = { files: 0, viewedFiles: 0, lines: 0, viewedLines: 0, generated: 0, notMine: 0 };
+    for (const { filename, additions, deletions } of state.files) {
+      const reason = isGenerated(filename) ? "generated" : ownership && isMine(filename) === false ? "notMine" : null;
+      if (reason) p[reason] += 1;
+      if (reason && !all) continue;
+      p.files += 1;
+      p.lines += additions + deletions;
+      if (isViewedNow(filename, live, records)) {
+        p.viewedFiles += 1;
+        p.viewedLines += additions + deletions;
+      }
+    }
+    p.pct = Math.floor(100 * (p.lines ? p.viewedLines / p.lines : p.files ? p.viewedFiles / p.files : 0));
+    return p;
+  };
+
+  const BULK_GROUPS = [
+    { label: "Generated", test: (path) => isGenerated(path) },
+    { label: "Tests", test: (path) => categoryOf(path) === "tests" },
+    { label: "Not mine", test: (path) => ownershipMode() !== "off" && isMine(path) === false },
+  ];
+  const BULK_CLICK_GAP_MS = 150;
+  let bulkRunning = false;
+  let reviewSnapshot = null;
+
+  const liveViewed = (controls) => new Map([...controls].map(([path, control]) => [path, isViewed(control)]));
+
+  const reviewData = () => {
+    if (!state.files || !panelOpen) return null;
+    const bulkHere = config.features.bulkViewed && FILES_PATH.test(location.pathname);
+    if (!config.features.reviewProgress && !bulkHere) return null;
+    const live = liveViewed(viewedControls());
+    if (config.features.reviewProgress) syncViewedRecords(live);
+    const records = viewedRecords();
+    const unviewed = state.files.map((f) => f.filename).filter((path) => !isViewedNow(path, live, records));
+    return {
+      progress: config.features.reviewProgress ? reviewProgress(live, records) : null,
+      bulk: bulkHere ? BULK_GROUPS.map((group) => unviewed.filter(group.test).length) : null,
+    };
+  };
+
+  // Clicks GitHub's own Viewed controls so GitHub persists the state. Files GitHub hasn't rendered have no control yet.
+  const markViewed = async (group) => {
+    if (bulkRunning || !state.files) return;
+    bulkRunning = true;
+    renderPanel(true);
+    let controls = viewedControls();
+    const live = liveViewed(controls);
+    const records = viewedRecords();
+    const targets = state.files.map((f) => f.filename).filter((path) => group.test(path) && !isViewedNow(path, live, records));
+    let marked = 0;
+    let missing = 0;
+    try {
+      for (const path of targets) {
+        if (controls.get(path)?.isConnected === false) controls = viewedControls();
+        const control = controls.get(path);
+        if (!control) {
+          missing += 1;
+          continue;
+        }
+        if (isViewed(control)) continue;
+        control.click();
+        marked += 1;
+        await new Promise((resolve) => setTimeout(resolve, BULK_CLICK_GAP_MS));
+      }
+    } finally {
+      bulkRunning = false;
+      renderPanel(true);
+    }
+    const notLoaded = missing ? `${missing} not loaded yet — scroll down and run again` : "";
+    if (marked) toast(notLoaded ? `Marked ${marked} viewed; ${notLoaded}` : `Marked ${marked} viewed`, notLoaded ? 5000 : 2000);
+    else toast(notLoaded ? `None marked; ${notLoaded}` : "Nothing to mark", notLoaded ? 5000 : 2000);
+  };
+
+  const progressSection = (p) => {
+    const all = progressScope() === "all";
+    const excluded = [p.generated && `${p.generated} generated`, p.notMine && `${p.notMine} not yours`].filter(Boolean);
+    const scopeToggle = excluded.length
+      ? h(
+          "span",
+          { class: "prr-seg" },
+          ...["mine", "all"].map((option) =>
+            h(
+              "button",
+              {
+                class: `prr-btn${option === progressScope() ? " prr-on" : ""}`,
+                type: "button",
+                title: option === "mine" ? "Skip generated files and files owned by others" : "Count every file",
+                onclick: () => {
+                  store.set("progressScope", option);
+                  renderPanel(true);
+                },
+              },
+              option,
+            ),
+          ),
+        )
+      : null;
+    return inlineSection(
+      "Review progress",
+      scopeToggle,
+      h(
+        "div",
+        { class: "prr-meter", role: "progressbar", "aria-label": "Review progress", "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": p.pct },
+        h("div", { class: "prr-meter-fill", style: `width: ${p.pct}%` }),
+      ),
+      h(
+        "div",
+        { title: FILES_PATH.test(location.pathname) ? "" : "Off the Files tab this counts the Viewed ticks this script has recorded for the current version of each file" },
+        p.files ? `${p.pct}% · ${p.viewedFiles}/${p.files} files · ${p.viewedLines}/${p.lines} lines` : "No files to review",
+      ),
+      excluded.length ? h("div", { class: "prr-muted" }, `${all ? "incl." : "excl."} ${excluded.join(", ")}`) : null,
+    );
+  };
+
+  const bulkSection = (counts) =>
+    section(
+      "Mark viewed",
+      h(
+        "div",
+        { class: "prr-bulk" },
+        ...BULK_GROUPS.map((group, i) =>
+          counts[i]
+            ? h(
+                "button",
+                {
+                  class: "prr-btn",
+                  type: "button",
+                  disabled: bulkRunning,
+                  title: `Tick Viewed on the ${counts[i]} unviewed ${group.label.toLowerCase()} files`,
+                  onclick: () => markViewed(group),
+                },
+                `${group.label} (${counts[i]})`,
+              )
+            : null,
+        ),
+      ),
+    );
+
   const section = (title, ...body) => h("div", { class: "prr-section" }, h("div", { class: "prr-title" }, title), ...body);
 
   const inlineSection = (title, control, ...detail) =>
@@ -1149,6 +1334,10 @@
         ),
       );
     }
+
+    // The meter is a summary, so it goes first.
+    if (reviewSnapshot?.progress) out.unshift(progressSection(reviewSnapshot.progress));
+    if (reviewSnapshot?.bulk?.some(Boolean)) out.push(bulkSection(reviewSnapshot.bulk));
 
     return out;
   };
@@ -1364,6 +1553,7 @@
 
   const renderPanel = (force = false) => {
     if (!state.pr) return;
+    reviewSnapshot = reviewData();
     const signature = JSON.stringify([
       state.version,
       unresolvedThreads().length,
@@ -1373,6 +1563,9 @@
       ownershipMode(),
       config.features.tickets ? ticketMatches().map(([id, url]) => id + url).join() : "",
       location.pathname,
+      reviewSnapshot,
+      bulkRunning,
+      progressScope(),
     ]);
     if (!force && signature === lastSignature) return;
     lastSignature = signature;
@@ -1531,6 +1724,11 @@
       border: 1px solid var(--borderColor-default, #d0d7de); border-bottom-width: 2px; background: var(--bgColor-muted, #f6f8fa); }
     body.prr-hide-noise .prr-noise { display: none !important; }
     .prr-flash { outline: 3px solid var(--borderColor-accent-emphasis, #0969da); outline-offset: 2px; }
+    .prr-meter { height: 6px; margin: 6px 0 4px; border-radius: 999px; overflow: hidden; background: var(--bgColor-neutral-muted, #afb8c133); }
+    .prr-meter-fill { height: 100%; border-radius: inherit; background: var(--bgColor-success-emphasis, #1f883d); transition: width .2s; }
+    .prr-bulk { display: flex; flex-wrap: wrap; gap: 4px; }
+    .prr-bulk .prr-btn { margin-left: 0; }
+    .prr-btn:disabled { opacity: .6; cursor: progress; }
   `);
 
   GM_registerMenuCommand("Edit config (JSON)", () => {
