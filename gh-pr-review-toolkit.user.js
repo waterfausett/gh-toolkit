@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.11.0
+// @version      0.11.1
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -1798,7 +1798,7 @@
   const liveViewed = (controls) => new Map([...controls].map(([path, control]) => [path, isViewed(control)]));
 
   const reviewData = () => {
-    if (!state.files || !panelOpen) return null;
+    if (!state.files || (!panelOpen && !(config.features.reviewProgress && FILES_PATH.test(location.pathname)))) return null;
     const bulkHere = config.features.bulkViewed && FILES_PATH.test(location.pathname);
     if (!config.features.reviewProgress && !bulkHere) return null;
     const live = liveViewed(viewedControls());
@@ -1883,6 +1883,44 @@
       ),
       excluded.length ? h("div", { class: "prr-muted" }, `${all ? "incl." : "excl."} ${excluded.join(", ")}`) : null,
     );
+  };
+
+  // GitHub's own "3 / 12 viewed" counter differs between diff views, so it is found by its text rather than a selector.
+  const VIEWED_COUNTER = /^\s*\d+\s*\/\s*\d+\s+(files\s+)?viewed\s*$/i;
+  let viewedCounter = null;
+  let counterSearchedAt = 0;
+
+  const findViewedCounter = () => {
+    if (viewedCounter?.isConnected) return viewedCounter;
+    if (Date.now() - counterSearchedAt < 1000) return null;
+    counterSearchedAt = Date.now();
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => (/viewed/i.test(node.data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT),
+    });
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      let el = node.parentElement;
+      for (let depth = 0; el && depth < 3 && !el.closest("#prr-panel, #prr-modal"); depth++, el = el.parentElement) {
+        if (VIEWED_COUNTER.test(el.textContent)) return (viewedCounter = el);
+      }
+    }
+    return null;
+  };
+
+  const placeInlineProgress = (p) => {
+    const existing = document.querySelector(".prr-inline-progress");
+    const counter = p && FILES_PATH.test(location.pathname) ? findViewedCounter() : null;
+    if (!counter) {
+      existing?.remove();
+      return;
+    }
+    const text = p.files ? `${p.pct}% of ${progressScope() === "all" ? "" : "your "}lines` : "";
+    const excluded = [p.generated && `${p.generated} generated`, p.notMine && `${p.notMine} not yours`].filter(Boolean);
+    const title = `PR toolkit: ${p.viewedFiles}/${p.files} files · ${p.viewedLines}/${p.lines} lines${
+      excluded.length ? ` (${progressScope() === "all" ? "incl." : "excl."} ${excluded.join(", ")})` : ""
+    }`;
+    if (existing && existing.previousElementSibling === counter && existing.textContent === text && existing.title === title) return;
+    existing?.remove();
+    if (text) counter.after(h("span", { class: "prr-inline-progress", title }, text));
   };
 
   const bulkSection = (counts) =>
@@ -2374,6 +2412,7 @@
   const renderPanel = (force = false) => {
     if (!state.pr) return;
     reviewSnapshot = reviewData();
+    placeInlineProgress(reviewSnapshot?.progress);
     const signature = JSON.stringify([
       state.version,
       unresolvedThreads().length,
@@ -2600,7 +2639,10 @@
       background: var(--bgColor-accent-muted, #ddf4ff); color: var(--fgColor-accent, #0969da); }
     a.prr-chip:hover { text-decoration: underline; }
     span.prr-chip { background: var(--bgColor-muted, #f6f8fa); color: var(--fgColor-muted, #656d76); }
-    .prr-badge { font-size: 11px; padding: 1px 6px; margin-right: 6px; border-radius: 999px; }
+    .prr-badge { display: inline-flex; align-items: center; align-self: center; vertical-align: middle; font-size: 11px; line-height: 16px;
+      padding: 1px 6px; margin-right: 6px; border-radius: 999px; white-space: nowrap; }
+    .prr-inline-progress { display: inline-flex; align-items: center; align-self: center; vertical-align: middle; margin-left: 8px; font-size: 12px;
+      white-space: nowrap; color: var(--fgColor-muted, #656d76); font-variant-numeric: tabular-nums; }
     .prr-warn { background: var(--bgColor-attention-muted, #fff8c5); color: var(--fgColor-attention, #9a6700); }
     .prr-tree-dim > div { opacity: .55; }
     .prr-on { font-weight: 600; background: var(--bgColor-accent-muted, #ddf4ff); }
