@@ -5,8 +5,12 @@ One Tampermonkey userscript that adds a floating panel and a few per-file helper
 ## Install
 
 1. Install Tampermonkey.
-2. Create a new script and paste in `gh-pr-review-toolkit.user.js`.
+2. Open [gh-pr-review-toolkit.user.js](https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js) and click **Install**. The optional [Actions workflow filter](https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-actions-workflow-filter.user.js) installs the same way.
 3. Open a PR. Tampermonkey will ask to allow connections to `github.com`, `raw.githubusercontent.com` and `patch-diff.githubusercontent.com`; allow them.
+
+### Updates
+
+Installed scripts update themselves from this repo through `@updateURL`. Tampermonkey checks on its own schedule (Settings → Script Update), or immediately from Dashboard → "Check for userscript updates". It only updates when `@version` increases, so bump it with every change you push. Config is kept in Tampermonkey storage and survives updates. Edits made in the Tampermonkey editor are overwritten by the next update, so make changes in the repo.
 
 ## First-time setup
 

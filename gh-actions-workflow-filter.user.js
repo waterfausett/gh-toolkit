@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         GitHub Actions Workflow Filter
 // @namespace    https://github.com/
-// @version      0.1.0
+// @version      0.1.1
 // @description  Adds a filter box to the workflows sidebar on GitHub Actions pages
+// @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-actions-workflow-filter.user.js
+// @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-actions-workflow-filter.user.js
 // @match        https://github.com/*
 // @run-at       document-idle
 // @grant        GM_getValue

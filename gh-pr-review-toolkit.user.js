@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.10.3
+// @version      0.10.4
 // @description  Viewed-state across pushes, since-last-review diff, thread navigation, noise hiding, snippets, CI and stats panel for GitHub PRs.
+// @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
+// @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @match        https://github.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
