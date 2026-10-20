@@ -39,6 +39,7 @@
       nextUnviewed: true,
       copyPermalink: true,
       checksTab: false,
+      reviewButton: true,
     },
     snippets: {
       nit: "nit: ",
@@ -77,6 +78,7 @@
         { key: "threads", label: "Unresolved thread navigator", hint: "Alt+J / Alt+K" },
         { key: "nextUnviewed", label: "Jump to next / previous unviewed file", hint: "Alt+N / Alt+Shift+N" },
         { key: "changedFilter", label: "\"Changed since viewed\" in the file filter" },
+        { key: "reviewButton", label: "Review button", hint: "Alt+R", note: "Opens GitHub's review dialog, going to Files first if needed" },
       ],
     },
     {
@@ -691,10 +693,23 @@
       (el) => el.textContent.length < 80 && /\bchecks?\b/i.test(el.textContent) && !el.closest(".timeline-comment, .js-comment") && el.getClientRects().length,
     );
 
-  const CHECKS_JUMP_KEY = "prr-jump-checks";
-  const CHECKS_JUMP_WAIT_MS = 10_000;
+  const JUMP_WAIT_MS = 10_000;
 
   const onConversationTab = () => currentTab()?.suffix === "";
+
+  // No trailing \b: the newer Files view renders a long and a short label in the same button ("Submit reviewReview") and hides one with CSS.
+  const REVIEW_LABEL = /^(review changes|submit review|finish (your )?review)/i;
+
+  // The dialog's own "Submit review" button shares the label, so anything inside a form or dialog is skipped: we only ever open the dialog, never submit it.
+  const findReviewButton = () =>
+    [...document.querySelectorAll("summary, button")].find(
+      (el) =>
+        !el.closest("#prr-panel, form, dialog, [role='dialog'], details-dialog") &&
+        el.getAttribute("type") !== "submit" &&
+        (/\bReviewMenuButton__/.test(el.className) ||
+          REVIEW_LABEL.test((el.getAttribute("aria-label") || el.textContent).replace(/\s+/g, " ").trim())) &&
+        el.getClientRects().length,
+    );
 
   const CHECKS_VIEWPORT_OFFSET = 0.3;
   const CHECKS_SETTLE_MS = 2500;
@@ -721,47 +736,72 @@
     USER_SCROLL_EVENTS.forEach((type) => addEventListener(type, stop, { capture: true, once: true }));
   };
 
-  const clearChecksJump = () => {
+  // A jump goes to a tab, waits for something on it to render, then acts on it.
+  const JUMPS = {
+    checks: {
+      key: "prr-jump-checks",
+      here: onConversationTab,
+      href: () => tabHref(NAV_TABS[0]),
+      find: findChecksHeading,
+      land: scrollToChecks,
+      missing: "Couldn't find the checks section on this page",
+    },
+    review: {
+      key: "prr-jump-review",
+      here: () => FILES_PATH.test(location.pathname),
+      href: () => tabHref(NAV_TABS[3]),
+      find: findReviewButton,
+      land: (button) => button.click(),
+      missing: "Couldn't find GitHub's review button on this page",
+    },
+  };
+
+  const clearJump = (jump) => {
     try {
-      sessionStorage.removeItem(CHECKS_JUMP_KEY);
+      sessionStorage.removeItem(jump.key);
     } catch {}
   };
 
-  // The merge box renders after navigation, and the 1.5s full-load fallback in goTo wipes in-memory state, so the pending jump is persisted.
-  const awaitChecksHeading = (deadline) => {
+  // The target renders after navigation, and the 1.5s full-load fallback in goTo wipes in-memory state, so the pending jump is persisted.
+  const awaitJump = (jump, deadline) => {
     const timer = setInterval(() => {
-      const heading = onConversationTab() && findChecksHeading();
-      if (!heading && Date.now() < deadline) return;
+      const target = jump.here() && jump.find();
+      if (!target && Date.now() < deadline) return;
       clearInterval(timer);
-      clearChecksJump();
-      if (heading) scrollToChecks(heading);
-      else toast("Couldn't find the checks section on this page");
+      clearJump(jump);
+      if (target) jump.land(target);
+      else toast(jump.missing);
     }, 250);
   };
 
-  const jumpToChecks = () => {
-    if (onConversationTab()) {
-      const heading = findChecksHeading();
-      if (heading) scrollToChecks(heading);
-      else toast("Couldn't find the checks section on this page");
+  const startJump = (jump) => {
+    if (jump.here()) {
+      const target = jump.find();
+      if (target) jump.land(target);
+      else toast(jump.missing);
       return;
     }
-    const deadline = Date.now() + CHECKS_JUMP_WAIT_MS;
+    const deadline = Date.now() + JUMP_WAIT_MS;
     try {
-      sessionStorage.setItem(CHECKS_JUMP_KEY, String(deadline));
+      sessionStorage.setItem(jump.key, String(deadline));
     } catch {}
-    goTo(tabHref(NAV_TABS[0]));
-    awaitChecksHeading(deadline);
+    goTo(jump.href());
+    awaitJump(jump, deadline);
   };
 
-  const resumeChecksJump = () => {
-    let deadline = 0;
-    try {
-      deadline = Number(sessionStorage.getItem(CHECKS_JUMP_KEY));
-    } catch {}
-    if (deadline > Date.now()) awaitChecksHeading(deadline);
-    else clearChecksJump();
-  };
+  const jumpToChecks = () => startJump(JUMPS.checks);
+
+  const openReview = () => startJump(JUMPS.review);
+
+  const resumeJumps = () =>
+    Object.values(JUMPS).forEach((jump) => {
+      let deadline = 0;
+      try {
+        deadline = Number(sessionStorage.getItem(jump.key));
+      } catch {}
+      if (deadline > Date.now()) awaitJump(jump, deadline);
+      else clearJump(jump);
+    });
 
   const nextFlaggedIndex = (flags, from, direction) => {
     const count = flags.length;
@@ -1240,6 +1280,7 @@
     { keys: ["Alt", "N"], label: "Next unviewed file", feature: "nextUnviewed", filesOnly: true },
     { keys: ["Alt", "Shift", "N"], label: "Previous unviewed file", feature: "nextUnviewed", filesOnly: true },
     { keys: ["Alt", "C"], label: "Copy selected code as a quote with link", feature: "copyPermalink", filesOnly: true },
+    { keys: ["Alt", "R"], label: "Open GitHub's review dialog", feature: "reviewButton" },
     { keys: ["Alt", "J"], label: "Next unresolved thread", feature: "threads" },
     { keys: ["Alt", "K"], label: "Previous unresolved thread", feature: "threads" },
     { keys: ["Alt", ","], label: "Open settings" },
@@ -1342,6 +1383,9 @@
       h(
         "span",
         { class: "prr-tools" },
+        config.features.reviewButton
+          ? h("button", { class: "prr-btn prr-review", type: "button", title: "Open GitHub's review dialog (Alt+R)", onclick: openReview }, "Review")
+          : null,
         h("button", { class: "prr-btn", type: "button", title: "Scroll to top", onclick: () => scrollTo({ top: 0, behavior: "smooth" }) }, "↑ Top"),
         h("button", { class: "prr-btn", type: "button", title: "Keyboard shortcuts (Alt+/)", "aria-label": "Keyboard shortcuts", onclick: toggleHelp }, "?"),
         h("button", { class: "prr-btn", type: "button", title: "Settings (Alt+,)", "aria-label": "Settings", onclick: toggleSettings }, "⚙"),
@@ -1429,6 +1473,7 @@
     .prr-btn:focus-visible, .prr-tab:focus-visible { outline: 2px solid var(--focus-outlineColor, #0969da); outline-offset: 1px; }
     .prr-tools .prr-btn { margin: 0; min-width: 24px; padding: 0 6px; border-color: transparent; background: transparent; color: var(--fgColor-muted, #656d76); }
     .prr-tools .prr-btn:hover { background: var(--control-bgColor-hover, #eaeef2); color: var(--fgColor-default, #1f2328); }
+    .prr-tools .prr-review { margin-right: 4px; font-weight: 500; border-color: var(--borderColor-default, #d0d7de); color: var(--fgColor-default, #1f2328); }
     .prr-section .prr-btn:first-of-type { margin-left: 0; }
     .prr-inline-title { margin-bottom: 0; }
     .prr-seg { display: flex; }
@@ -1523,6 +1568,11 @@
       toggleHelp();
       return;
     }
+    if (altOnly && state.pr && config.features.reviewButton && event.code === "KeyR") {
+      event.preventDefault();
+      openReview();
+      return;
+    }
     if (altOnly && state.pr && event.code === "Comma") {
       event.preventDefault();
       toggleSettings();
@@ -1561,5 +1611,5 @@
   new MutationObserver(debounce(scan, 300)).observe(document.body, { childList: true, subtree: true });
   new MutationObserver(scheduleFilterItem).observe(document.body, { childList: true, subtree: true });
   scan();
-  resumeChecksJump();
+  resumeJumps();
 })();
