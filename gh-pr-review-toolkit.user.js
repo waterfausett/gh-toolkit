@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.12.1
+// @version      0.12.2
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -1064,6 +1064,30 @@
     return (id && document.getElementById(id)) || (path && findFileEl(path)) || null;
   };
 
+  const STICKY_GAP_PX = 8;
+  const isPinned = (el) => ["sticky", "fixed"].includes(getComputedStyle(el).position);
+
+  // GitHub pins its PR header and the diff toolbar to the top; a file's own sticky header doesn't count, since it moves with the file.
+  const stickyTop = () => {
+    const files = fileEntries().map((entry) => entry.el);
+    let bottom = 0;
+    for (let pass = 0; pass < 4; pass++) {
+      let next = bottom;
+      for (const hit of document.elementsFromPoint(innerWidth / 2, bottom + 1)) {
+        for (let el = hit; el && el !== document.body; el = el.parentElement) {
+          if (!isPinned(el) || el.closest("#prr-panel, #prr-toast") || files.some((file) => file.contains(el))) continue;
+          next = Math.max(next, el.getBoundingClientRect().bottom);
+        }
+      }
+      if (next <= bottom) break;
+      bottom = next;
+    }
+    return bottom;
+  };
+
+  const scrollToFile = (el, behavior = "auto") =>
+    scrollTo({ top: scrollY + el.getBoundingClientRect().top - stickyTop() - STICKY_GAP_PX, behavior });
+
   const landOnFile = (el) => {
     const { path } = fileTarget();
     try {
@@ -1074,10 +1098,10 @@
       toast("That file is hidden by a filter");
       return;
     }
-    el.scrollIntoView({ block: "start", behavior: "auto" });
+    scrollToFile(el);
     flash(el);
     // Expanding and lazy-rendered files above shift the layout, so settle once more.
-    setTimeout(() => el.isConnected && el.scrollIntoView({ block: "start", behavior: "auto" }), 400);
+    setTimeout(() => el.isConnected && scrollToFile(el), 400);
   };
 
   // A jump goes to a tab, waits for something on it to render, then acts on it.
@@ -1175,7 +1199,7 @@
     return Boolean(control) && !isViewed(control);
   };
 
-  // Sticky headers keep a file's top edge below 0 after scrollIntoView, so "current" tolerates that offset.
+  // Jumps land a file below the sticky headers, so "current" tolerates that offset.
   const CURRENT_FILE_TOLERANCE_PX = 80;
 
   const stepUnviewed = (direction) => {
@@ -1184,7 +1208,8 @@
     const entries = rendered
       .filter(({ el }) => !rendered.some((other) => other.el !== el && el.contains(other.el)))
       .sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
-    const current = entries.findLastIndex(({ el }) => el.getBoundingClientRect().top <= CURRENT_FILE_TOLERANCE_PX);
+    const threshold = Math.max(CURRENT_FILE_TOLERANCE_PX, stickyTop() + STICKY_GAP_PX + 2);
+    const current = entries.findLastIndex(({ el }) => el.getBoundingClientRect().top <= threshold);
     const flags = entries.map(({ el, path }) => isUnviewed(el) && !collapsedByRule(path));
     const target = entries[nextFlaggedIndex(flags, direction > 0 ? current : Math.max(current, 0), direction)];
     if (!target) {
@@ -1192,7 +1217,7 @@
       toast(hasControls ? "No unviewed files" : "Couldn't find the Viewed controls on this page");
       return;
     }
-    target.el.scrollIntoView({ block: "start", behavior: "smooth" });
+    scrollToFile(target.el, "smooth");
     flash(target.el);
   };
 
@@ -2101,7 +2126,8 @@
                   title: path,
                   onclick: (e) => {
                     e.preventDefault();
-                    findFileEl(path)?.scrollIntoView({ block: "start", behavior: "smooth" });
+                    const el = findFileEl(path);
+                    if (el) scrollToFile(el, "smooth");
                   },
                 },
                 path.split("/").slice(-2).join("/"),
