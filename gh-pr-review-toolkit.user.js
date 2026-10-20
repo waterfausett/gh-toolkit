@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.11.1
+// @version      0.11.2
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -1767,8 +1767,7 @@
 
   const progressScope = () => (store.get("progressScope", "mine") === "all" ? "all" : "mine");
 
-  const reviewProgress = (live, records) => {
-    const all = progressScope() === "all";
+  const reviewProgress = (live, records, all = progressScope() === "all") => {
     const ownership = ownershipMode() !== "off";
     const p = { files: 0, viewedFiles: 0, lines: 0, viewedLines: 0, generated: 0, notMine: 0 };
     for (const { filename, additions, deletions } of state.files) {
@@ -1807,6 +1806,7 @@
     const unviewed = state.files.map((f) => f.filename).filter((path) => !isViewedNow(path, live, records));
     return {
       progress: config.features.reviewProgress ? reviewProgress(live, records) : null,
+      progressBoth: config.features.reviewProgress ? [reviewProgress(live, records, false), reviewProgress(live, records, true)] : null,
       bulk: bulkHere ? BULK_GROUPS.map((group) => unviewed.filter(group.test).length) : null,
     };
   };
@@ -1906,21 +1906,57 @@
     return null;
   };
 
-  const placeInlineProgress = (p) => {
-    const existing = document.querySelector(".prr-inline-progress");
-    const counter = p && FILES_PATH.test(location.pathname) ? findViewedCounter() : null;
-    if (!counter) {
-      existing?.remove();
-      return;
-    }
-    const text = p.files ? `${p.pct}% of ${progressScope() === "all" ? "" : "your "}lines` : "";
-    const excluded = [p.generated && `${p.generated} generated`, p.notMine && `${p.notMine} not yours`].filter(Boolean);
-    const title = `PR toolkit: ${p.viewedFiles}/${p.files} files · ${p.viewedLines}/${p.lines} lines${
-      excluded.length ? ` (${progressScope() === "all" ? "incl." : "excl."} ${excluded.join(", ")})` : ""
-    }`;
-    if (existing && existing.previousElementSibling === counter && existing.textContent === text && existing.title === title) return;
+  // Keeps one toolkit element beside GitHub's counter, rebuilding it only when its content changes.
+  const syncInline = (cls, counter, key, build, side) => {
+    const existing = document.querySelector(`.${cls}`);
+    const placed = existing && (side === "after" ? existing.previousElementSibling : existing.nextElementSibling) === counter;
+    if (placed && existing.dataset.prrKey === key) return;
     existing?.remove();
-    if (text) counter.after(h("span", { class: "prr-inline-progress", title }, text));
+    if (!counter || !key) return;
+    const el = build();
+    el.dataset.prrKey = key;
+    counter[side](el);
+  };
+
+  const progressText = (mine, all) => {
+    const split = mine.files && (mine.files !== all.files || mine.lines !== all.lines);
+    if (split) return `${mine.pct}% of your lines · ${all.pct}% of all`;
+    return all.files ? `${all.pct}% of lines` : "";
+  };
+
+  const progressTitle = (mine, all) => {
+    const counts = (p) => `${p.viewedFiles}/${p.files} files · ${p.viewedLines}/${p.lines} lines`;
+    const excluded = [mine.generated && `${mine.generated} generated`, mine.notMine && `${mine.notMine} not yours`].filter(Boolean);
+    return [
+      "PR toolkit",
+      mine.files && excluded.length ? `Yours: ${counts(mine)} (excl. ${excluded.join(", ")})` : null,
+      `Whole PR: ${counts(all)}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  };
+
+  const placeInlineIndicators = (snapshot) => {
+    const here = FILES_PATH.test(location.pathname);
+    const both = here ? snapshot?.progressBoth : null;
+    const leftovers = here && config.features.leftovers ? leftoverList() : [];
+    const counter = both || leftovers.length ? findViewedCounter() : null;
+    const text = both ? progressText(...both) : "";
+    const title = both ? progressTitle(...both) : "";
+    syncInline("prr-inline-progress", counter, text && `${text}|${title}`, () => h("span", { class: "prr-inline-progress", title }, text), "after");
+    const count = leftovers.length;
+    syncInline(
+      "prr-inline-leftovers",
+      counter,
+      count ? String(count) : "",
+      () =>
+        h(
+          "button",
+          { class: "prr-badge prr-warn prr-inline-leftovers", type: "button", title: "Debug leftovers in added lines: jump to the next (Alt+L)", onclick: () => stepLeftover(1) },
+          `${count} leftover${count === 1 ? "" : "s"}`,
+        ),
+      "before",
+    );
   };
 
   const bulkSection = (counts) =>
@@ -2412,7 +2448,7 @@
   const renderPanel = (force = false) => {
     if (!state.pr) return;
     reviewSnapshot = reviewData();
-    placeInlineProgress(reviewSnapshot?.progress);
+    placeInlineIndicators(reviewSnapshot);
     const signature = JSON.stringify([
       state.version,
       unresolvedThreads().length,
@@ -2643,6 +2679,8 @@
       padding: 1px 6px; margin-right: 6px; border-radius: 999px; white-space: nowrap; }
     .prr-inline-progress { display: inline-flex; align-items: center; align-self: center; vertical-align: middle; margin-left: 8px; font-size: 12px;
       white-space: nowrap; color: var(--fgColor-muted, #656d76); font-variant-numeric: tabular-nums; }
+    .prr-inline-leftovers { margin: 0 8px 0 0; border: 0; font-family: inherit; cursor: pointer; }
+    .prr-inline-leftovers:hover { text-decoration: underline; }
     .prr-warn { background: var(--bgColor-attention-muted, #fff8c5); color: var(--fgColor-attention, #9a6700); }
     .prr-tree-dim > div { opacity: .55; }
     .prr-on { font-weight: 600; background: var(--bgColor-accent-muted, #ddf4ff); }
