@@ -46,6 +46,9 @@
       bulkViewed: true,
       filePalette: true,
       suggestFromSelection: true,
+      collapseTrivial: true,
+      leftovers: true,
+      depSummary: true,
     },
     snippets: {
       nit: "nit: ",
@@ -75,6 +78,19 @@
     adoBase: "",
     myOwners: [],
     minePatterns: [],
+    leftoverPatterns: [
+      { label: "console.log", pattern: "\\bconsole\\.(log|debug|trace|dir)\\(", files: "\\.[cm]?[jt]sx?$|\\.(vue|svelte|astro)$" },
+      { label: "debugger", pattern: "^\\s*debugger\\s*;?\\s*$", files: "\\.[cm]?[jt]sx?$|\\.(vue|svelte|astro)$" },
+      { label: ".only", pattern: "\\b(describe|it|test|context|suite)\\.only\\(", files: "\\.[cm]?[jt]sx?$" },
+      { label: "print()", pattern: "^\\s*print\\(", files: "\\.py$" },
+      { label: "breakpoint", pattern: "\\bbreakpoint\\(\\)|\\bi?pdb\\.set_trace\\(", files: "\\.py$" },
+      { label: "TODO", pattern: "\\b(TODO|FIXME)\\b" },
+      {
+        label: "localhost",
+        pattern: "\\b(localhost|127\\.0\\.0\\.1)\\b",
+        exclude: "\\.(md|mdx|rst|txt)$|(^|/)(tests?|__tests__|e2e|docs?)/|\\.(test|spec)\\.|(^|/)\\.env|docker-compose|(^|/)\\.devcontainer/",
+      },
+    ],
   };
 
   const FEATURE_GROUPS = [
@@ -99,6 +115,8 @@
         { key: "whitespace", label: "Open files tab with whitespace hidden" },
         { key: "viewedAcrossPushes", label: "Viewed-state across pushes" },
         { key: "copyPermalink", label: "Copy selected lines as a quote with link", hint: "Alt+C" },
+        { key: "collapseTrivial", label: "Collapse whitespace-only and rename-only files" },
+        { key: "leftovers", label: "Flag debug leftovers in added lines", hint: "Alt+L / Alt+Shift+L", note: "console.log, debugger, TODO, .only( …: leftoverPatterns" },
       ],
     },
     {
@@ -117,6 +135,7 @@
         { key: "checksTab", label: "Checks nav item opens the Checks tab", note: "Off: scrolls to the checks summary on Conversation" },
         { key: "reviewProgress", label: "Review progress meter", note: "Weighted by changed lines; skips generated files and files owned by others" },
         { key: "bulkViewed", label: "Bulk mark viewed buttons", note: "Generated, test and not-mine files; Files tab only" },
+        { key: "depSummary", label: "Dependency changes", note: "package.json, requirements*.txt, pyproject.toml" },
       ],
     },
   ];
@@ -252,28 +271,195 @@
       });
     });
 
-  const parseDiff = (text) => {
+  const stripWs = (text) => text.replace(/\s+/g, "");
+
+  const NPM_SECTION = /^(dependencies|devDependencies|peerDependencies|optionalDependencies)$/;
+  const NPM_VERSION = /^([~^<>=*]|v?\d|latest$|next$|(workspace|npm|file|link|portal|catalog|github|https?|git(\+[a-z]+)?):)/;
+  const NOT_PACKAGES = new Set(["version", "node", "npm", "yarn", "pnpm", "python", "requires-python"]);
+  const PEP508 = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*([^;]*)/;
+  const POETRY_TABLE = /^tool\.poetry\.(group\.[^.]+\.)?(dev-)?dependencies$/;
+
+  const pyName = (name) => name.toLowerCase().replace(/[-_.]+/g, "-");
+
+  // strict: outside a known dependency list, only accept strings that carry a version operator.
+  const pipRequirement = (spec, section, strict) => {
+    const m = spec.trim().match(PEP508);
+    const version = m?.[3].trim() ?? "";
+    if (!m || (version && !/^([<>=!~]|@)/.test(version)) || (strict && !version)) return null;
+    return { key: pyName(m[1]), name: m[1], version, section };
+  };
+
+  // Hunks often start inside a section, so side.section stays undefined until a header line is seen and entries are then guessed from shape.
+  const npmEntries = (line, side) => {
+    const open = line.match(/^\s*"([^"]+)"\s*:\s*\{/);
+    if (open) side.section = NPM_SECTION.test(open[1]) && !/\}\s*,?\s*$/.test(line) ? open[1] : null;
+    else if (/^\s*\}/.test(line)) side.section = null;
+    const m = !open && line.match(/^(\s*)"([^"]+)"\s*:\s*"([^"]*)"/);
+    if (!m) return [];
+    const guessed =
+      side.section === undefined && m[1].replace(/\t/g, "  ").length >= 4 && !NOT_PACKAGES.has(m[2]) && NPM_VERSION.test(m[3]);
+    return side.section || guessed ? [{ key: m[2], name: m[2], version: m[3], section: side.section ?? "" }] : [];
+  };
+
+  const pipEntries = (line) => {
+    const text = line.replace(/(^|\s)#.*$/, "").replace(/\\$/, "").trim();
+    const req = text && !text.startsWith("-") && pipRequirement(text, "", false);
+    return req ? [req] : [];
+  };
+
+  const pyprojectSection = (table, array) => {
+    if (table === undefined) return array === "dependencies" || array === "requires" ? array : undefined;
+    if (table === "project" && array === "dependencies") return "dependencies";
+    if (table === "project.optional-dependencies") return `extra ${array}`;
+    if (table === "dependency-groups") return `group ${array}`;
+    if (table === "build-system" && array === "requires") return "build";
+    return null;
+  };
+
+  const pyprojectEntries = (line, side) => {
+    const text = line.replace(/(^|\s)#.*$/, "");
+    const table = text.match(/^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*$/);
+    if (table) {
+      side.table = table[1].replace(/["'\s]/g, "");
+      side.array = null;
+      return [];
+    }
+    let body = text;
+    const assign = !side.array && text.match(/^\s*("[^"]+"|'[^']+'|[\w.-]+)\s*=\s*(.*)$/);
+    if (assign) {
+      const key = assign[1].replace(/["']/g, "");
+      const value = assign[2].trim();
+      side.array = null;
+      if (!value.startsWith("[")) {
+        if (side.table !== undefined && !POETRY_TABLE.test(side.table)) return [];
+        const version = value.match(/^"([^"]*)"/)?.[1] ?? value.match(/^\{.*\bversion\s*=\s*"([^"]*)"/)?.[1];
+        if (version === undefined || NOT_PACKAGES.has(key)) return [];
+        if (side.table === undefined && !/^([\^~]|[<>=!]=?)\s*\d/.test(version)) return [];
+        return [{ key: pyName(key), name: key, version, section: side.table?.replace(/^tool\.poetry\./, "") ?? "" }];
+      }
+      side.array = key;
+      body = value.slice(1);
+    }
+    if (side.array === null) return [];
+    const section = pyprojectSection(side.table, side.array);
+    const label = section ?? side.array ?? "";
+    if (/\]/.test(body.replace(/"[^"]*"|'[^']*'/g, ""))) side.array = null;
+    if (section === null) return [];
+    return [...body.matchAll(/"([^"]*)"|'([^']*)'/g)]
+      .map((m) => pipRequirement(m[1] ?? m[2], label, section === undefined))
+      .filter(Boolean);
+  };
+
+  const MANIFESTS = [
+    { re: /(^|\/)package\.json$/, entries: npmEntries },
+    { re: /(^|\/)requirements[^/]*\.(txt|in)$/, entries: pipEntries },
+    { re: /(^|\/)pyproject\.toml$/, entries: pyprojectEntries },
+  ];
+
+  const diffDeps = (before, after) => {
+    const deps = [];
+    for (const [key, { name, version, section }] of after) {
+      const old = before.get(key);
+      const moved = old?.section && section && old.section !== section;
+      if (!old) deps.push({ change: "added", name, version, section });
+      else if (old.version !== version || moved) deps.push({ change: "changed", name, version, section, from: old.version, fromSection: old.section });
+    }
+    for (const [key, { name, version, section }] of before) {
+      if (!after.has(key)) deps.push({ change: "removed", name, version, section });
+    }
+    return deps;
+  };
+
+  const compileLeftoverRules = (patterns) =>
+    patterns.flatMap((rule) => {
+      const { pattern, label = pattern, files, exclude } = typeof rule === "string" ? { pattern: rule } : rule;
+      try {
+        return [{ label, re: new RegExp(pattern), files: files && new RegExp(files), exclude: exclude && new RegExp(exclude) }];
+      } catch {
+        return [];
+      }
+    });
+
+  const MAX_LEFTOVERS_PER_FILE = 50;
+
+  // Keeps per file only counts, flags, leftovers and dependency changes; hunk text is dropped as each hunk ends.
+  const parseDiff = (text, leftoverRules = []) => {
     const files = [];
     let current = null;
-    let inHunk = false;
+    let scratch = null;
+    let hunk = null;
+    const endHunk = () => {
+      if (!hunk) return;
+      if (scratch.whitespaceOnly && hunk.oldText !== hunk.newText) scratch.whitespaceOnly = false;
+      for (const item of hunk.leftovers) {
+        if (!hunk.removed.has(stripWs(item.text)) && current.leftovers.length < MAX_LEFTOVERS_PER_FILE) current.leftovers.push(item);
+      }
+      hunk = null;
+    };
+    const endFile = () => {
+      if (!current) return;
+      endHunk();
+      const { renamed, similarity, hunks, other, whitespaceOnly, oldDeps, newDeps } = scratch;
+      if (renamed && !hunks && !other && similarity === 100) current.trivial = "renamed";
+      else if (hunks && whitespaceOnly && !other) current.trivial = "whitespace";
+      if (current.trivial) current.leftovers = [];
+      current.deps = diffDeps(oldDeps, newDeps);
+    };
     for (const line of text.split("\n")) {
       if (line.startsWith("diff --git ")) {
+        endFile();
         const m = line.match(/^diff --git a\/(.+) b\/(.+)$/);
-        current = { filename: m ? m[2] : line.slice(11), sha: "", additions: 0, deletions: 0 };
+        current = { filename: m ? m[2] : line.slice(11), sha: "", additions: 0, deletions: 0, trivial: "", leftovers: [], deps: [] };
+        scratch = { renamed: false, similarity: 0, hunks: 0, other: false, whitespaceOnly: true, oldDeps: new Map(), newDeps: new Map() };
         files.push(current);
-        inHunk = false;
       } else if (!current) {
         continue;
       } else if (line.startsWith("@@")) {
-        inHunk = true;
-      } else if (!inHunk && line.startsWith("index ")) {
-        current.sha = line.match(/\.\.([0-9a-f]+)/)?.[1]?.slice(0, 7) ?? "";
-      } else if (inHunk && line.startsWith("+")) {
-        current.additions += 1;
-      } else if (inHunk && line.startsWith("-")) {
-        current.deletions += 1;
+        endHunk();
+        if (!scratch.hunks) {
+          const path = current.filename;
+          scratch.rules = leftoverRules.filter((rule) => (!rule.files || rule.files.test(path)) && !rule.exclude?.test(path));
+          scratch.manifest = MANIFESTS.find((manifest) => manifest.re.test(path));
+        }
+        scratch.hunks += 1;
+        hunk = { newLine: Number(line.match(/\+(\d+)/)?.[1] ?? 1), oldText: "", newText: "", removed: new Set(), leftovers: [] };
+        scratch.oldSide = {};
+        scratch.newSide = {};
+        const context = line.replace(/^@@[^@]*@@ ?/, "");
+        if (scratch.manifest && context) {
+          scratch.manifest.entries(context, scratch.oldSide);
+          scratch.manifest.entries(context, scratch.newSide);
+        }
+      } else if (!hunk) {
+        if (line.startsWith("index ")) current.sha = line.match(/\.\.([0-9a-f]+)/)?.[1]?.slice(0, 7) ?? "";
+        else if (line.startsWith("rename from ")) scratch.renamed = true;
+        else if (line.startsWith("rename to ")) current.filename = line.slice(10);
+        else if (line.startsWith("similarity index ")) scratch.similarity = parseInt(line.slice(17), 10);
+        else if (/^(old mode|new mode|Binary files|GIT binary patch)/.test(line)) scratch.other = true;
+      } else if (line[0] !== "\\") {
+        const sign = line[0] ?? " ";
+        const content = line.slice(1);
+        if (sign === "+") current.additions += 1;
+        else if (sign === "-") current.deletions += 1;
+        if (scratch.whitespaceOnly) {
+          const stripped = stripWs(content);
+          if (sign !== "+") hunk.oldText += stripped;
+          if (sign !== "-") hunk.newText += stripped;
+        }
+        if (sign === "+" && scratch.rules.length) {
+          const rule = scratch.rules.find((r) => r.re.test(content));
+          if (rule) hunk.leftovers.push({ line: hunk.newLine, label: rule.label, text: content.trim().slice(0, 120) });
+        } else if (sign === "-" && scratch.rules.length) {
+          hunk.removed.add(stripWs(content));
+        }
+        if (scratch.manifest) {
+          if (sign !== "+") for (const entry of scratch.manifest.entries(content, scratch.oldSide)) if (sign === "-") scratch.oldDeps.set(entry.key, entry);
+          if (sign !== "-") for (const entry of scratch.manifest.entries(content, scratch.newSide)) if (sign === "+") scratch.newDeps.set(entry.key, entry);
+        }
+        if (sign !== "-") hunk.newLine += 1;
       }
     }
+    endFile();
     return files;
   };
 
@@ -285,11 +471,14 @@
     hashToPath: new Map(),
     version: 0,
     loadedAt: 0,
+    byPath: new Map(),
+    pathToId: new Map(),
   };
   const userExpanded = new Set();
   let panelOpen = store.get("panelOpen", true);
   let lastSignature = "";
   let threadCursor = -1;
+  let leftoverCursor = -1;
 
   const codeownersRegex = (pattern) => {
     const anchored = pattern.startsWith("/") || pattern.slice(0, -1).includes("/");
@@ -340,7 +529,7 @@
       fetchText(`https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}.diff`),
       loadCodeowners(pr),
     ]);
-    const files = diffText?.startsWith("diff --git") ? parseDiff(diffText) : null;
+    const files = diffText?.startsWith("diff --git") ? parseDiff(diffText, compileLeftoverRules(config.leftoverPatterns)) : null;
     const hashToPath = new Map(
       await Promise.all((files ?? []).map(async (f) => [`diff-${await sha256Hex(f.filename)}`, f.filename])),
     );
@@ -352,7 +541,10 @@
       shas: new Map((files ?? []).map((f) => [f.filename, f.sha])),
       version: state.version + 1,
       loadedAt: Date.now(),
+      byPath: new Map((files ?? []).map((f) => [f.filename, f])),
+      pathToId: new Map([...hashToPath].map(([id, path]) => [path, id])),
     });
+    leftoverCursor = -1;
     applyChangedFilter();
     renderPanel(true);
   };
@@ -366,9 +558,12 @@
       hashToPath: new Map(),
       loadedAt: 0,
       version: state.version + 1,
+      byPath: new Map(),
+      pathToId: new Map(),
     });
     userExpanded.clear();
     threadCursor = -1;
+    leftoverCursor = -1;
     applyNoiseDefault();
   };
 
@@ -519,6 +714,12 @@
 
   const badge = (text, tone) => h("span", { class: `prr-badge prr-${tone}` }, text);
 
+  const TRIVIAL_REASONS = { renamed: "Renamed", whitespace: "Whitespace only" };
+
+  const trivialReason = (path) => (config.features.collapseTrivial && TRIVIAL_REASONS[state.byPath.get(path)?.trivial]) || "";
+
+  const fileLeftovers = (path) => (config.features.leftovers && !isGenerated(path) && state.byPath.get(path)?.leftovers) || [];
+
   const setCollapsed = ({ el, actions }, collapsed) => {
     for (const child of el.children) child.classList.toggle("prr-body-hidden", collapsed && !child.contains(actions));
   };
@@ -559,7 +760,14 @@
 
     const collapseReason =
       (config.features.collapseGenerated && isGenerated(path) && "Generated") ||
-      (config.features.collapseTests && categoryOf(path) === "tests" && "Tests");
+      (config.features.collapseTests && categoryOf(path) === "tests" && "Tests") ||
+      trivialReason(path);
+    if (trivialReason(path)) actions.prepend(badge(trivialReason(path).toLowerCase(), "muted"));
+    const leftovers = fileLeftovers(path);
+    if (leftovers.length) {
+      const title = leftovers.map((item) => `L${item.line} ${item.label}: ${item.text}`).join("\n");
+      actions.prepend(Object.assign(badge(`${leftovers.length} leftover${leftovers.length === 1 ? "" : "s"}`, "warn"), { title }));
+    }
     if (collapseReason) {
       const chevron = findChevron(entry);
       if (chevron) {
@@ -768,22 +976,12 @@
     return (id && document.getElementById(id)) || (path && findFileEl(path)) || null;
   };
 
-  const expandFile = (el, path) => {
-    const chevron = findChevron({ el });
-    if (chevron && !isChevronExpanded(chevron)) {
-      userExpanded.add(path);
-      chevron.click();
-    } else if ([...el.children].some((child) => child.classList.contains("prr-body-hidden"))) {
-      el.querySelector(".prr-btn")?.click();
-    }
-  };
-
   const landOnFile = (el) => {
     const { path } = fileTarget();
     try {
       sessionStorage.removeItem(FILE_TARGET_KEY);
     } catch {}
-    if (path) expandFile(el, path);
+    if (path) expandFile({ el, path });
     if (!el.getClientRects().length) {
       toast("That file is hidden by a filter");
       return;
@@ -880,7 +1078,9 @@
 
   const collapsedByRule = (path) =>
     !userExpanded.has(path) &&
-    ((config.features.collapseGenerated && isGenerated(path)) || (config.features.collapseTests && categoryOf(path) === "tests"));
+    ((config.features.collapseGenerated && isGenerated(path)) ||
+      (config.features.collapseTests && categoryOf(path) === "tests") ||
+      Boolean(trivialReason(path)));
 
   const isUnviewed = (el) => {
     const control = el.querySelector(VIEWED_CONTROL_SEL);
@@ -1246,6 +1446,87 @@
     else toast(`Suggestion added${skipped}; edit it and post when ready`);
   };
 
+  const leftoverList = () =>
+    (state.files ?? []).flatMap((file) => fileLeftovers(file.filename).map((item) => ({ path: file.filename, ...item })));
+
+  // Classic rows carry id="<file id>R<n>"; otherwise fall back to the row whose last line number (as rowLine reads it) is the new-side line.
+  const findLineRow = (entry, line) => {
+    const id = entry.el.id || state.pathToId.get(entry.path);
+    const cell = id && document.getElementById(`${id}R${line}`);
+    if (cell) return cell.closest("tr") ?? cell;
+    return [...entry.el.querySelectorAll(`[data-line-number="${line}"]`)]
+      .map((node) => node.closest("tr"))
+      .find((row) => row && rowLine(row)?.side === "R" && rowLine(row)?.n === line);
+  };
+
+  const expandFile = (entry) => {
+    userExpanded.add(entry.path);
+    const chevron = findChevron(entry);
+    if (chevron && !isChevronExpanded(chevron)) {
+      clickingChevron = true;
+      chevron.click();
+      clickingChevron = false;
+    } else if ([...entry.el.children].some((child) => child.classList.contains("prr-body-hidden"))) {
+      entry.el.querySelector(".prr-btn")?.click();
+    }
+    delete entry.el.dataset.prrVersion;
+    processFile(entry);
+  };
+
+  const LINE_WAIT_MS = 3000;
+
+  // Expanding a file or letting GitHub load it renders rows asynchronously, so the line is polled for.
+  const revealLine = (item) => {
+    const deadline = Date.now() + LINE_WAIT_MS;
+    let seenEntry = false;
+    let askedGithub = false;
+    const attempt = () => {
+      const entry = fileEntries().find(({ path }) => path === item.path);
+      if (entry && !seenEntry) {
+        seenEntry = true;
+        expandFile(entry);
+        entry.el.scrollIntoView({ block: "start", behavior: "auto" });
+      }
+      const row = entry && findLineRow(entry, item.line);
+      if (row) {
+        row.scrollIntoView({ block: "center", behavior: "smooth" });
+        flash(row);
+        return;
+      }
+      const id = state.pathToId.get(item.path);
+      if (!entry && !askedGithub && id) {
+        askedGithub = true;
+        location.hash = `${id}R${item.line}`;
+      }
+      if (Date.now() < deadline) {
+        setTimeout(attempt, 150);
+      } else if (entry) {
+        flash(entry.el);
+        toast(`Line ${item.line} isn't rendered; the file may need "Load diff"`);
+      } else {
+        toast(`${item.path.split("/").at(-1)} isn't rendered yet`);
+      }
+    };
+    attempt();
+  };
+
+  const jumpToLeftover = (item) => {
+    const id = state.pathToId.get(item.path);
+    if (FILES_PATH.test(location.pathname)) revealLine(item);
+    else goTo(`${tabHref(NAV_TABS[3])}${id ? `#${id}R${item.line}` : ""}`);
+  };
+
+  const stepLeftover = (direction) => {
+    const items = leftoverList();
+    if (!items.length) {
+      toast(state.files ? "No debug leftovers in added lines" : "PR diff not loaded yet");
+      return;
+    }
+    leftoverCursor =
+      leftoverCursor < 0 ? (direction > 0 ? 0 : items.length - 1) : (leftoverCursor + direction + items.length) % items.length;
+    jumpToLeftover(items[leftoverCursor]);
+  };
+
   const discoverAdoBase = () => {
     if (config.adoBase) return config.adoBase;
     const href = document.querySelector("a[href*='/_workitems/edit/']")?.href;
@@ -1552,6 +1833,25 @@
       ...detail,
     );
 
+  const MAX_PANEL_ROWS = 8;
+  const MAX_DEP_ROWS = 25;
+
+  const DEP_MARKS = { added: ["+", "prr-add"], removed: ["−", "prr-del"], changed: ["~", "prr-muted"] };
+  const SECTION_TAGS = { devDependencies: "dev", peerDependencies: "peer", optionalDependencies: "optional", dependencies: "" };
+
+  const depRow = ({ change, name, version, from, section, fromSection }) => {
+    const [mark, tone] = DEP_MARKS[change];
+    const tag = SECTION_TAGS[section] ?? section;
+    const detail =
+      change !== "changed" ? version : from === version ? `${fromSection} → ${section}` : `${from} → ${version}`;
+    return h(
+      "div",
+      { class: "prr-row", title: [name, section, detail].filter(Boolean).join(" · ") },
+      h("span", { class: "prr-dep-name" }, h("span", { class: tone }, mark), ` ${name}`, tag ? h("span", { class: "prr-muted" }, ` ${tag}`) : null),
+      h("span", { class: "prr-muted prr-dep-version" }, detail),
+    );
+  };
+
   const buildSections = () => {
     const out = [];
     if (state.loadedAt && !state.files) {
@@ -1681,6 +1981,61 @@
     // The meter is a summary, so it goes first.
     if (reviewSnapshot?.progress) out.unshift(progressSection(reviewSnapshot.progress));
     if (reviewSnapshot?.bulk?.some(Boolean)) out.push(bulkSection(reviewSnapshot.bulk));
+    if (config.features.leftovers && state.files) {
+      const items = leftoverList();
+      if (items.length) {
+        out.push(
+          inlineSection(
+            `Debug leftovers (${items.length})`,
+            h(
+              "span",
+              { class: "prr-seg" },
+              h("button", { class: "prr-btn", type: "button", title: "Alt+Shift+L", onclick: () => stepLeftover(-1) }, "◀ Prev"),
+              h("button", { class: "prr-btn", type: "button", title: "Alt+L", onclick: () => stepLeftover(1) }, "Next ▶"),
+            ),
+            ...items.slice(0, MAX_PANEL_ROWS).map((item, index) =>
+              h(
+                "a",
+                {
+                  href: "#",
+                  class: "prr-block",
+                  title: `${item.path}:${item.line}\n${item.text}`,
+                  onclick: (e) => {
+                    e.preventDefault();
+                    leftoverCursor = index;
+                    jumpToLeftover(item);
+                  },
+                },
+                `${item.path.split("/").at(-1)}:${item.line} `,
+                h("span", { class: "prr-muted" }, item.label),
+              ),
+            ),
+            items.length > MAX_PANEL_ROWS ? h("div", { class: "prr-muted" }, `and ${items.length - MAX_PANEL_ROWS} more (Alt+L)`) : null,
+          ),
+        );
+      }
+    }
+
+    if (config.features.depSummary && state.files) {
+      const manifests = state.files.filter((file) => file.deps.length);
+      const total = manifests.reduce((sum, file) => sum + file.deps.length, 0);
+      if (total) {
+        let budget = MAX_DEP_ROWS;
+        const body = manifests.flatMap((file) => {
+          if (budget <= 0) return [];
+          const rows = file.deps.slice(0, budget).map(depRow);
+          budget -= rows.length;
+          return [h("div", { class: "prr-block prr-muted prr-dep-file", title: file.filename }, file.filename), ...rows];
+        });
+        out.push(
+          section(
+            `Dependencies (${total})`,
+            ...body,
+            total > MAX_DEP_ROWS ? h("div", { class: "prr-muted" }, `and ${total - MAX_DEP_ROWS} more`) : null,
+          ),
+        );
+      }
+    }
 
     return out;
   };
@@ -1822,6 +2177,8 @@
     { keys: ["Alt", "/"], label: "Show this help" },
     { keys: ["Alt", "P"], label: "Jump to a file by name", feature: "filePalette" },
     { keys: ["Alt", "G"], label: "Suggest a change on the selected lines", feature: "suggestFromSelection", filesOnly: true },
+    { keys: ["Alt", "L"], label: "Next debug leftover", feature: "leftovers", filesOnly: true },
+    { keys: ["Alt", "Shift", "L"], label: "Previous debug leftover", feature: "leftovers", filesOnly: true },
   ];
 
   const shortcutRow = ({ keys, label, filesOnly }) =>
@@ -1868,9 +2225,11 @@
   const toggleSettings = () =>
     toggleModal("settings", () => {
       const resetDefaults = () => {
+        const leftoverPatterns = JSON.stringify(config.leftoverPatterns);
         store.set("config", {});
         config = loadConfig();
         applyConfigChange();
+        if (state.pr && JSON.stringify(config.leftoverPatterns) !== leftoverPatterns) loadData(state.pr);
         closeModal();
         toggleSettings();
       };
@@ -2086,28 +2445,36 @@
     .prr-palette-meta { flex: none; display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
     .prr-palette-meta .prr-tree-dot, .prr-palette-meta .prr-badge { margin: 0; }
     .prr-palette-empty { padding: 4px 8px; }
+    .prr-dep-file { margin-top: 4px; font-size: 11px; }
+    .prr-dep-name, .prr-dep-version { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .prr-dep-version { flex: 0 1 auto; max-width: 55%; }
   `);
 
   GM_registerMenuCommand("Edit config (JSON)", () => {
-    const edited = prompt("Config JSON (snippets, ticketRules, ticketIgnorePrefixes, adoBase, generatedPatterns, myOwners, minePatterns, features):", JSON.stringify(config));
+    const edited = prompt("Config JSON (snippets, ticketRules, ticketIgnorePrefixes, adoBase, generatedPatterns, myOwners, minePatterns, leftoverPatterns, features):", JSON.stringify(config));
     if (edited === null) return;
     try {
+      const leftoverPatterns = JSON.stringify(config.leftoverPatterns);
       config = { ...DEFAULTS, ...JSON.parse(edited) };
       config.features = { ...DEFAULTS.features, ...config.features };
       saveConfig();
       state.version += 1;
       scan();
       renderPanel(true);
+      // Leftovers are found while parsing the diff, so new patterns need a re-fetch.
+      if (state.pr && JSON.stringify(config.leftoverPatterns) !== leftoverPatterns) loadData(state.pr);
     } catch (err) {
       alert(`Invalid JSON: ${err.message}`);
     }
   });
   GM_registerMenuCommand("Reset config", () => {
+    const leftoverPatterns = JSON.stringify(config.leftoverPatterns);
     store.set("config", {});
     config = loadConfig();
     state.version += 1;
     scan();
     renderPanel(true);
+    if (state.pr && JSON.stringify(config.leftoverPatterns) !== leftoverPatterns) loadData(state.pr);
   });
 
   document.addEventListener("input", expandSnippet, true);
@@ -2155,6 +2522,11 @@
       if (config.features.suggestFromSelection && event.code === "KeyG") {
         event.preventDefault();
         suggestFromSelection();
+        return;
+      }
+      if (config.features.leftovers && event.code === "KeyL") {
+        event.preventDefault();
+        stepLeftover(event.shiftKey ? -1 : 1);
         return;
       }
     }
