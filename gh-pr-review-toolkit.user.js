@@ -44,6 +44,8 @@
       reviewButton: true,
       reviewProgress: true,
       bulkViewed: true,
+      filePalette: true,
+      suggestFromSelection: true,
     },
     snippets: {
       nit: "nit: ",
@@ -84,6 +86,7 @@
         { key: "nextUnviewed", label: "Jump to next / previous unviewed file", hint: "Alt+N / Alt+Shift+N" },
         { key: "changedFilter", label: "\"Changed since viewed\" in the file filter" },
         { key: "reviewButton", label: "Review button", hint: "Alt+R", note: "Opens GitHub's review dialog, going to Files first if needed" },
+        { key: "filePalette", label: "Quick file jump", hint: "Alt+P", note: "Fuzzy-find a file in this PR and jump to it" },
       ],
     },
     {
@@ -104,6 +107,7 @@
         { key: "hideNoise", label: "Hide bot comments" },
         { key: "snippets", label: "Snippet expander", hint: ";trigger + space" },
         { key: "tickets", label: "Ticket chips" },
+        { key: "suggestFromSelection", label: "Suggestion from selected lines", hint: "Alt+G", note: "Opens a comment with a suggestion block; never posts it" },
       ],
     },
     {
@@ -747,6 +751,49 @@
     USER_SCROLL_EVENTS.forEach((type) => addEventListener(type, stop, { capture: true, once: true }));
   };
 
+  // The target path is kept beside the jump's deadline so it survives the full-load fallback too.
+  const FILE_TARGET_KEY = "prr-jump-file-target";
+  let fileTargetMemo = {};
+
+  const fileTarget = () => {
+    try {
+      return JSON.parse(sessionStorage.getItem(FILE_TARGET_KEY)) ?? fileTargetMemo;
+    } catch {
+      return fileTargetMemo;
+    }
+  };
+
+  const findFileTarget = () => {
+    const { path, id } = fileTarget();
+    return (id && document.getElementById(id)) || (path && findFileEl(path)) || null;
+  };
+
+  const expandFile = (el, path) => {
+    const chevron = findChevron({ el });
+    if (chevron && !isChevronExpanded(chevron)) {
+      userExpanded.add(path);
+      chevron.click();
+    } else if ([...el.children].some((child) => child.classList.contains("prr-body-hidden"))) {
+      el.querySelector(".prr-btn")?.click();
+    }
+  };
+
+  const landOnFile = (el) => {
+    const { path } = fileTarget();
+    try {
+      sessionStorage.removeItem(FILE_TARGET_KEY);
+    } catch {}
+    if (path) expandFile(el, path);
+    if (!el.getClientRects().length) {
+      toast("That file is hidden by a filter");
+      return;
+    }
+    el.scrollIntoView({ block: "start", behavior: "auto" });
+    flash(el);
+    // Expanding and lazy-rendered files above shift the layout, so settle once more.
+    setTimeout(() => el.isConnected && el.scrollIntoView({ block: "start", behavior: "auto" }), 400);
+  };
+
   // A jump goes to a tab, waits for something on it to render, then acts on it.
   const JUMPS = {
     checks: {
@@ -764,6 +811,14 @@
       find: findReviewButton,
       land: (button) => button.click(),
       missing: "Couldn't find GitHub's review button on this page",
+    },
+    file: {
+      key: "prr-jump-file",
+      here: () => FILES_PATH.test(location.pathname),
+      href: () => `${tabHref(NAV_TABS[3])}#${fileTarget().id ?? ""}`,
+      find: findFileTarget,
+      land: landOnFile,
+      missing: "Couldn't find that file on this page",
     },
   };
 
@@ -901,6 +956,294 @@
     const url = `https://github.com/${owner}/${repo}/pull/${number}${filesSuffix()}${anchor}`;
     GM_setClipboard(quoteMarkdown(entry.path, url, fragment, text), "text");
     toast(fragment ? "Copied quote with link" : "Copied quote with file link (line numbers not found)");
+  };
+
+  const jumpToFile = async (path) => {
+    const id = `diff-${await sha256Hex(path)}`;
+    fileTargetMemo = { path, id };
+    try {
+      sessionStorage.setItem(FILE_TARGET_KEY, JSON.stringify(fileTargetMemo));
+    } catch {}
+    const jump = JUMPS.file;
+    if (!jump.here() || jump.find()) {
+      startJump(jump);
+      return;
+    }
+    // Files GitHub hasn't rendered yet load when their #diff- anchor becomes the hash, as the file tree's own links do.
+    if (location.hash === `#${id}`) dispatchEvent(new HashChangeEvent("hashchange"));
+    else location.hash = id;
+    awaitJump(jump, Date.now() + JUMP_WAIT_MS);
+  };
+
+  const subsequence = (query, text) => {
+    const positions = [];
+    let from = 0;
+    for (const char of query) {
+      const index = text.indexOf(char, from);
+      if (index < 0) return null;
+      positions.push(index);
+      from = index + 1;
+    }
+    return positions;
+  };
+
+  // Lower is better: basename matches rank above whole-path ones, then substrings, tight matches and early starts.
+  const fuzzyScore = (query, path) => {
+    const q = query.toLowerCase().replace(/\s+/g, "");
+    if (!q) return 0;
+    const lower = path.toLowerCase();
+    const base = lower.slice(lower.lastIndexOf("/") + 1);
+    const inBase = subsequence(q, base);
+    const positions = inBase ?? subsequence(q, lower);
+    if (!positions) return null;
+    const at = (inBase ? base : lower).indexOf(q);
+    const gaps = at >= 0 ? 0 : positions.at(-1) - positions[0] + 1 - q.length;
+    return (inBase ? 0 : 1e6) + (at >= 0 ? 0 : 1e5) + Math.min(gaps, 999) * 100 + Math.min(at >= 0 ? at : positions[0], 99);
+  };
+
+  const rankPaths = (query, items) =>
+    items
+      .map((item, index) => ({ item, index, score: fuzzyScore(query, item.path) }))
+      .filter((match) => match.score !== null)
+      .sort((a, b) => a.score - b.score || a.index - b.index)
+      .map((match) => match.item);
+
+  const PALETTE_LIMIT = 50;
+
+  const paletteItems = () => {
+    const stats = new Map((state.files ?? []).map((f) => [f.filename, f]));
+    const elements = new Map(fileEntries().map(({ el, path }) => [path, el]));
+    const changed = config.features.viewedAcrossPushes && state.pr ? new Set(changedSinceViewed()) : new Set();
+    const records = state.pr ? viewedRecords() : {};
+    const ownership = ownershipMode();
+    return knownPaths().map((path) => {
+      const control = elements.get(path)?.querySelector(VIEWED_CONTROL_SEL);
+      const sha = state.shas.get(path);
+      const category = categoryOf(path);
+      return {
+        path,
+        file: stats.get(path),
+        viewed: control ? isViewed(control) : Boolean(sha) && records[digest(path)] === sha,
+        changed: changed.has(path),
+        notMine: ownership !== "off" && isMine(path) === false,
+        tag: category === "generated" || category === "tests" ? category : "",
+      };
+    });
+  };
+
+  const paletteRow = (item, index, onchoose, onhover) => {
+    const slash = item.path.lastIndexOf("/");
+    return h(
+      "li",
+      { class: "prr-palette-item", role: "option", id: `prr-palette-${index}`, title: item.path, onmousedown: (e) => e.preventDefault(), onclick: onchoose, onmousemove: onhover },
+      h("span", { class: "prr-palette-name" }, h("strong", {}, item.path.slice(slash + 1)), slash > 0 ? h("span", { class: "prr-muted" }, ` ${item.path.slice(0, slash)}`) : null),
+      h(
+        "span",
+        { class: "prr-palette-meta" },
+        item.changed ? h("span", { class: "prr-tree-dot prr-tree-dot-changed", title: "Changed since you viewed it" }) : null,
+        item.notMine ? h("span", { class: "prr-tree-dot prr-tree-dot-notmine", title: "Not mine (CODEOWNERS)" }) : null,
+        item.tag ? h("span", { class: "prr-badge prr-muted" }, item.tag === "tests" ? "test" : item.tag) : null,
+        item.viewed ? h("span", { class: "prr-muted", title: "Viewed" }, "✓") : null,
+        item.file ? h("span", { class: "prr-add" }, `+${item.file.additions}`) : null,
+        item.file ? h("span", { class: "prr-del" }, `−${item.file.deletions}`) : null,
+      ),
+    );
+  };
+
+  const togglePalette = () =>
+    toggleModal("palette", () => {
+      const items = paletteItems();
+      let matches = [];
+      let cursor = 0;
+      const list = h("ul", { class: "prr-palette-list", role: "listbox", id: "prr-palette-list", "aria-label": "Files" });
+      const input = h("input", {
+        type: "text",
+        class: "prr-palette-input",
+        placeholder: "Jump to file…",
+        role: "combobox",
+        "aria-label": "File name",
+        "aria-controls": "prr-palette-list",
+        "aria-expanded": "true",
+        autocomplete: "off",
+        spellcheck: "false",
+      });
+      const choose = (item) => {
+        closeModal();
+        jumpToFile(item.path);
+      };
+      const move = (index) => {
+        if (!matches.length) return;
+        cursor = (index + matches.length) % matches.length;
+        [...list.children].forEach((row, i) => row.setAttribute("aria-selected", String(i === cursor)));
+        list.children[cursor]?.scrollIntoView({ block: "nearest" });
+        input.setAttribute("aria-activedescendant", `prr-palette-${cursor}`);
+      };
+      const render = () => {
+        matches = rankPaths(input.value, items).slice(0, PALETTE_LIMIT);
+        list.replaceChildren(
+          ...(matches.length
+            ? matches.map((item, i) => paletteRow(item, i, () => choose(item), () => cursor !== i && move(i)))
+            : [h("li", { class: "prr-muted prr-palette-empty" }, items.length ? "No matching files" : "No files found yet")]),
+        );
+        if (!matches.length) input.removeAttribute("aria-activedescendant");
+        move(0);
+      };
+      input.addEventListener("input", render);
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          move(cursor + (event.key === "ArrowDown" ? 1 : -1));
+        } else if (event.key === "Enter" && matches[cursor]) {
+          event.preventDefault();
+          choose(matches[cursor]);
+        }
+      });
+      openModal("palette", "Jump to file", h("div", { class: "prr-section prr-palette" }, input, list));
+      render();
+      input.focus();
+    });
+
+  const longestRun = (text, char) => Math.max(0, ...(text.match(new RegExp(`${char}+`, "g")) ?? []).map((run) => run.length));
+
+  const suggestionBlock = (text) => {
+    const fence = "`".repeat(Math.max(3, longestRun(text, "`") + 1));
+    return `${fence}suggestion\n${text}\n${fence}\n`;
+  };
+
+  const codeCellAfter = (numberCell) => {
+    let cell = numberCell.nextElementSibling;
+    while (cell?.hasAttribute("data-line-number")) cell = cell.nextElementSibling;
+    return cell;
+  };
+
+  // Diff markers and line numbers are drawn by CSS from data attributes in the classic view; the clone path drops marker elements elsewhere.
+  const codeText = (cell) => {
+    const inner = cell.matches(".blob-code-inner, .diff-text-inner") ? cell : cell.querySelector(".blob-code-inner, .diff-text-inner");
+    if (inner) return inner.textContent;
+    const clone = cell.cloneNode(true);
+    clone.querySelectorAll("button, [class*='marker' i], .sr-only").forEach((node) => node.remove());
+    return clone.textContent.replace(/\n$/, "");
+  };
+
+  const diffLine = (row) => {
+    const numbered = [...row.querySelectorAll("[data-line-number]")].filter((cell) => /^\d+$/.test(cell.dataset.lineNumber));
+    const cell = numbered.at(-1);
+    if (!cell) return null;
+    if (cellSide(cell) === "L") return { deleted: true };
+    const code = codeCellAfter(cell);
+    return code ? { row, cell, code, n: Number(cell.dataset.lineNumber), text: codeText(code) } : null;
+  };
+
+  const selectedNewLines = (first, last) => {
+    const lines = [];
+    let deleted = 0;
+    for (let row = first; row; row = row.nextElementSibling) {
+      const line = diffLine(row);
+      if (line?.deleted) deleted += 1;
+      else if (line) lines.push(line);
+      if (row === last) return { lines, deleted };
+    }
+    return null;
+  };
+
+  const waitFor = (find, ms) =>
+    new Promise((resolve) => {
+      const deadline = Date.now() + ms;
+      const timer = setInterval(() => {
+        const found = find();
+        if (!found && Date.now() < deadline) return;
+        clearInterval(timer);
+        resolve(found || null);
+      }, 100);
+    });
+
+  const fireMouse = (el, types, init = {}) =>
+    types.forEach((type) => el.dispatchEvent(new MouseEvent(type, { bubbles: !/enter$/.test(type), cancelable: true, view: window, ...init })));
+
+  const COMMENT_BUTTON_SEL = "button.js-add-line-comment, button.add-line-comment, button[aria-label*='comment' i]";
+  const COMMENT_WAIT_MS = 3000;
+
+  // GitHub inserts the line's "+" button on hover, so the hover is simulated first.
+  const commentButton = (line) => {
+    for (const el of [line.row, line.cell, line.code]) fireMouse(el, ["pointerover", "pointerenter", "mouseover", "mouseenter", "mousemove"]);
+    return [...line.row.querySelectorAll(COMMENT_BUTTON_SEL)].find((button) => button.type !== "submit" && !button.closest("form"));
+  };
+
+  // A range is selected the way a user does it, click the first line number and shift-click the last, before pressing "+" on the last line.
+  const openLineComment = async (fileEl, start, end) => {
+    const before = new Set(document.querySelectorAll("textarea"));
+    const wasActive = document.activeElement;
+    if (start !== end) {
+      fireMouse(start.cell, ["mousedown", "mouseup", "click"]);
+      fireMouse(end.cell, ["mousedown", "mouseup", "click"], { shiftKey: true });
+    }
+    const button = await waitFor(() => commentButton(end), 600);
+    if (!button) return null;
+    button.click();
+    return waitFor(() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLTextAreaElement && active !== wasActive && fileEl.contains(active)) return active;
+      return [...fileEl.querySelectorAll("textarea")].find((ta) => !before.has(ta) && ta.getClientRects().length);
+    }, COMMENT_WAIT_MS);
+  };
+
+  const insertText = (ta, text) => {
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    const insert = `${ta.value && !ta.value.endsWith("\n") ? "\n" : ""}${text}`;
+    // Comment boxes are React-controlled, so a plain .value write is only the fallback.
+    if (document.execCommand("insertText", false, insert)) return;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(ta, ta.value + insert);
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+
+  const COMMENT_RANGE = /lines?\s+[^\d\s]{0,2}(\d+)\s+(?:to|through|-|–)\s+[^\d\s]{0,2}(\d+)/i;
+
+  const formCoversRange = (ta, fileEl, start, end) => {
+    for (let el = ta.parentElement, depth = 0; el && el !== fileEl && depth < 8; el = el.parentElement, depth++) {
+      const m = el.textContent.match(COMMENT_RANGE);
+      if (m) return Number(m[1]) === start.n && Number(m[2]) === end.n;
+    }
+    return false;
+  };
+
+  const suggestFromSelection = async () => {
+    const selection = getSelection();
+    if (!selection?.rangeCount || selection.isCollapsed) {
+      toast("Select lines in the diff first");
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const entry = fileEntries().find(({ el }) => el.contains(range.commonAncestorContainer));
+    const [first, last] = selectedRows(range);
+    const picked = entry && first && last ? selectedNewLines(first, last) : null;
+    if (!picked) {
+      toast("Select lines within a single file in the diff");
+      return;
+    }
+    const { lines, deleted } = picked;
+    if (!lines.length) {
+      toast(deleted ? "Deleted lines can't take a suggestion; select lines on the new side" : "Couldn't read line numbers from the selection");
+      return;
+    }
+    if (lines.some((line, i) => i && line.n !== lines[i - 1].n + 1)) {
+      toast("Select lines within one hunk");
+      return;
+    }
+    const start = lines[0];
+    const end = lines.at(-1);
+    const block = suggestionBlock(lines.map((line) => line.text).join("\n"));
+    const where = start === end ? `line R${start.n}` : `lines R${start.n}–R${end.n}`;
+    const ta = await openLineComment(entry.el, start, end);
+    if (!ta) {
+      GM_setClipboard(block, "text");
+      toast(`Couldn't open a comment; suggestion copied. Comment on ${where} and paste it`);
+      return;
+    }
+    insertText(ta, block);
+    const skipped = deleted ? " (deleted lines left out)" : "";
+    if (start !== end && !formCoversRange(ta, entry.el, start, end)) toast(`Suggestion added${skipped}; check the comment covers ${where} before posting`);
+    else toast(`Suggestion added${skipped}; edit it and post when ready`);
   };
 
   const discoverAdoBase = () => {
@@ -1477,6 +1820,8 @@
     { keys: ["Alt", "K"], label: "Previous unresolved thread", feature: "threads" },
     { keys: ["Alt", ","], label: "Open settings" },
     { keys: ["Alt", "/"], label: "Show this help" },
+    { keys: ["Alt", "P"], label: "Jump to a file by name", feature: "filePalette" },
+    { keys: ["Alt", "G"], label: "Suggest a change on the selected lines", feature: "suggestFromSelection", filesOnly: true },
   ];
 
   const shortcutRow = ({ keys, label, filesOnly }) =>
@@ -1729,6 +2074,18 @@
     .prr-bulk { display: flex; flex-wrap: wrap; gap: 4px; }
     .prr-bulk .prr-btn { margin-left: 0; }
     .prr-btn:disabled { opacity: .6; cursor: progress; }
+    #prr-modal[data-modal="palette"] { align-items: flex-start; padding-top: 12vh; }
+    #prr-modal[data-modal="palette"] .prr-modal-card { width: min(640px, calc(100vw - 32px)); }
+    .prr-palette-input { width: 100%; box-sizing: border-box; padding: 6px 10px; font: inherit; border-radius: 6px; color: inherit;
+      border: 1px solid var(--borderColor-default, #d0d7de); background: var(--bgColor-default, #fff); }
+    .prr-palette-input:focus { outline: 2px solid var(--focus-outlineColor, #0969da); outline-offset: -1px; }
+    .prr-palette-list { list-style: none; margin: 8px -8px 0; padding: 0; max-height: 50vh; overflow: auto; }
+    .prr-palette-item { display: flex; align-items: center; gap: 12px; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+    .prr-palette-item[aria-selected="true"] { background: var(--bgColor-accent-muted, #ddf4ff); }
+    .prr-palette-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .prr-palette-meta { flex: none; display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+    .prr-palette-meta .prr-tree-dot, .prr-palette-meta .prr-badge { margin: 0; }
+    .prr-palette-empty { padding: 4px 8px; }
   `);
 
   GM_registerMenuCommand("Edit config (JSON)", () => {
@@ -1779,6 +2136,11 @@
       toggleSettings();
       return;
     }
+    if (altOnly && state.pr && config.features.filePalette && event.code === "KeyP") {
+      event.preventDefault();
+      togglePalette();
+      return;
+    }
     if (altOnly && state.pr && FILES_PATH.test(location.pathname)) {
       if (config.features.nextUnviewed && event.code === "KeyN") {
         event.preventDefault();
@@ -1788,6 +2150,11 @@
       if (config.features.copyPermalink && event.code === "KeyC") {
         event.preventDefault();
         copyQuote();
+        return;
+      }
+      if (config.features.suggestFromSelection && event.code === "KeyG") {
+        event.preventDefault();
+        suggestFromSelection();
         return;
       }
     }
