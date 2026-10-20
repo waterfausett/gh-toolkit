@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.10.4
+// @version      0.10.5
 // @description  Viewed-state across pushes, since-last-review diff, thread navigation, noise hiding, snippets, CI and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -54,11 +54,12 @@
     },
     ticketRules: [
       { pattern: "\\bAB#\\d+\\b", url: "", ado: true },
-      { pattern: "\\b[A-Z][A-Z0-9]{1,4}-\\d+\\b", url: "https://linear.app/issue/{id}", branchIgnoreCase: true },
+      { pattern: "\\b[A-Z][A-Z0-9]{1,9}-\\d+\\b", url: "https://linear.app/issue/{id}", branchIgnoreCase: true },
     ],
     ticketIgnorePrefixes: [
       "utf", "sha", "iso", "cve", "rfc", "http", "tls", "ssl", "aes", "rsa", "gpt", "pep", "md",
       "fix", "bug", "pr", "rc", "wip", "step", "task", "issue", "test", "node", "py", "v",
+      "feature", "feat", "hotfix", "bugfix", "release", "chore", "refactor", "version", "ticket", "story",
     ],
     generatedPatterns: [
       "(^|/)(package-lock\\.json|uv\\.lock|poetry\\.lock|yarn\\.lock|pnpm-lock\\.yaml)$",
