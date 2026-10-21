@@ -303,7 +303,7 @@ Each repo has its own list, stored in Tampermonkey storage under the lowercased 
 <summary><b>Starred, saved for later, recent and pending</b> — built-in chips for finding PRs in a busy repo</summary>
 <br>
 
-A PR's header gets **☆ Star** and **🔖 Save for later** next to its state label, and PR rows in lists get the same two icons on hover (lit when set), so you can mark a PR without opening it. They fill four built-in chips at the front of the saved-searches row, ahead of your own searches:
+A PR's header gets **☆ Star** and **🔖 Save for later** next to its state label (icon-only in the compact header GitHub pins to the top as you scroll), and PR rows in lists get the same two icons on hover (lit when set), so you can mark a PR without opening it. They fill four built-in chips at the front of the saved-searches row, ahead of your own searches:
 
 - **★ Starred**: kept until you unstar it, merged or closed included (`is:pr #a #b …`). Up to 50 per repo; past that you're asked to unstar one first.
 - **🔖 Later**: for "I'll review this when I have time". It's dropped once the PR is seen merged or closed, on its own page or as a list row, and the chip's `is:open` hides it before then. Up to 50 per repo. Merged and closed PRs don't offer it.

@@ -3005,23 +3005,32 @@
   };
 
   // React header: StateLabel's data-status is draft, pullOpened, pullMerged or pullClosed. Classic header: .State--merged / .State--closed.
-  const PR_STATE_LABEL = "[data-component='StateLabel'][data-status], .gh-header-meta .State";
+  // Both headers have a compact copy GitHub pins to the top once the real one scrolls away; .gh-header-sticky is the classic one.
+  const PR_STATE_LABEL = "[data-component='StateLabel'][data-status], .gh-header-meta .State, .gh-header-sticky .State";
   const prIsDone = (label) => /merged|closed/i.test(label.dataset.status ?? label.className);
 
+  // The first laid-out label outside the pinned copy gets the labelled buttons; every other one gets icons only.
+  const isMainStateLabel = (label) => label.getClientRects().length > 0 && !label.closest(".gh-header-sticky") && ![...ancestors(label)].some(isPinned);
+  function* ancestors(el) {
+    for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) yield a;
+  }
+
   const placePrMarks = () => {
-    const label = document.querySelector(PR_STATE_LABEL);
-    const existing = document.getElementById("prr-marks");
-    const done = Boolean(label) && prIsDone(label);
+    const labels = [...document.querySelectorAll(PR_STATE_LABEL)];
+    const done = labels.length > 0 && prIsDone(labels[0]);
     if (done) notePrDone(state.pr);
     const names = markedLists().filter((name) => !(done && name === "later"));
-    if (!label || !names.length) {
-      existing?.remove();
-      return;
+    const targets = names.length ? labels : [];
+    const main = targets.find(isMainStateLabel) ?? targets[0];
+    document.querySelectorAll(".prr-marks").forEach((box) => targets.includes(box.previousElementSibling) || box.remove());
+    for (const label of targets) {
+      const full = label === main;
+      const box = h("span", { class: `prr-marks${full ? "" : " prr-marks-compact"}` }, ...names.map((name) => markButton(state.pr, name, "prr-btn prr-mark-btn", full)));
+      const existing = label.nextElementSibling?.classList.contains("prr-marks") ? label.nextElementSibling : null;
+      if (existing?.outerHTML === box.outerHTML) continue;
+      if (existing) existing.replaceWith(box);
+      else label.after(box);
     }
-    const box = h("span", { id: "prr-marks" }, ...names.map((name) => markButton(state.pr, name, "prr-btn prr-mark-btn", true)));
-    if (existing?.innerHTML === box.innerHTML && existing.previousElementSibling === label) return;
-    existing?.remove();
-    label.after(box);
   };
 
   const listChips = (owner, repo) => {
@@ -3361,8 +3370,10 @@
     .prr-list-chip:hover, .prr-list-chip:focus-within { padding-right: 10px; }
     .prr-list-count { margin-left: 5px; color: var(--fgColor-muted, #656d76); font-variant-numeric: tabular-nums; }
     .prr-saved-sep { width: 1px; height: 16px; margin: 0 2px; background: var(--borderColor-default, #d0d7de); }
-    #prr-marks { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; }
-    #prr-marks .prr-mark-btn { margin: 0; line-height: 22px; }
+    .prr-marks { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; vertical-align: middle; }
+    .prr-marks .prr-mark-btn { margin: 0; line-height: 22px; }
+    .prr-marks-compact { gap: 4px; }
+    .prr-marks-compact .prr-mark-btn { padding: 0 6px; line-height: 20px; }
     .prr-mark-btn.prr-on { border-color: var(--borderColor-accent-emphasis, #0969da); color: var(--fgColor-accent, #0969da); }
     .prr-mark { padding: 0 2px; font: inherit; font-size: 13px; line-height: 16px; cursor: pointer; border: 0; border-radius: 4px; background: transparent;
       color: var(--fgColor-muted, #656d76); opacity: 0; filter: grayscale(1); transition: opacity .12s; }
@@ -3551,6 +3562,11 @@
   };
 
   new MutationObserver(debounce(scan, 300)).observe(document.body, { childList: true, subtree: true });
+  // React re-renders the PR header while it loads, dropping the marks; the debounced scan would leave them gone for a visible moment, so put them back before paint.
+  const touches = (nodes, selector) => [...nodes].some((node) => node.nodeType === 1 && (node.matches(selector) || node.querySelector(selector)));
+  new MutationObserver((records) => {
+    if (state.pr && records.some((r) => touches(r.removedNodes, ".prr-marks") || touches(r.addedNodes, PR_STATE_LABEL))) placePrMarks();
+  }).observe(document.body, { childList: true, subtree: true });
   new MutationObserver(scheduleFilterItem).observe(document.body, { childList: true, subtree: true });
   scan();
   resumeJumps();
