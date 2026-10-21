@@ -316,6 +316,96 @@
 
   const stripWs = (text) => text.replace(/\s+/g, "");
 
+  // #region coverage-core — pure: no DOM, GM_* or toolkit state (tests/coverage-core.test.mjs evaluates this block)
+  const inflateRaw = async (bytes) =>
+    new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer());
+
+  // Reads the central directory rather than walking local headers, which may defer sizes to a data descriptor.
+  const unzipText = async (buffer, want) => {
+    const view = new DataView(buffer);
+    const bytes = new Uint8Array(buffer);
+    let eocd = -1;
+    for (let i = buffer.byteLength - 22; i >= Math.max(0, buffer.byteLength - 65557); i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) throw new Error("not a zip file");
+    const count = view.getUint16(eocd + 10, true);
+    let p = view.getUint32(eocd + 16, true);
+    const out = [];
+    for (let n = 0; n < count; n++) {
+      if (p + 46 > buffer.byteLength || view.getUint32(p, true) !== 0x02014b50) throw new Error("corrupt zip directory");
+      const method = view.getUint16(p + 10, true);
+      const size = view.getUint32(p + 20, true);
+      const nameLength = view.getUint16(p + 28, true);
+      const local = view.getUint32(p + 42, true);
+      const name = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + nameLength));
+      p += 46 + nameLength + view.getUint16(p + 30, true) + view.getUint16(p + 32, true);
+      if (!want(name) || (method !== 0 && method !== 8)) continue;
+      const begin = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+      const raw = bytes.subarray(begin, begin + size);
+      out.push({ name, text: new TextDecoder().decode(method === 8 ? await inflateRaw(raw) : raw) });
+    }
+    return out;
+  };
+
+  const isCobertura = (text) => /<coverage[\s>]/.test(text.slice(0, 2000));
+
+  const XML_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+  const decodeXml = (text) => text.replace(/&(amp|lt|gt|quot|apos);/g, (_, name) => XML_ENTITIES[name]);
+  const xmlAttr = (attrs, name) => attrs.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
+
+  // Regex rather than DOMParser so Node can run it; Cobertura from coverage.py and istanbul is regular enough.
+  const parseCobertura = (xml) => {
+    const sources = [...xml.matchAll(/<source>([^<]*)<\/source>/g)].map((m) => decodeXml(m[1].trim()).replace(/\/$/, "")).filter(Boolean);
+    const files = [...xml.matchAll(/<class\b([^>]*)>([\s\S]*?)<\/class>/g)].flatMap(([, attrs, body]) => {
+      const filename = xmlAttr(attrs, "filename");
+      if (!filename) return [];
+      const lines = new Map();
+      for (const [, lineAttrs] of body.matchAll(/<line\b([^>]*)>/g)) {
+        const number = Number(xmlAttr(lineAttrs, "number"));
+        const hits = Number(xmlAttr(lineAttrs, "hits")) || 0;
+        if (number) lines.set(number, Math.max(lines.get(number) ?? 0, hits));
+      }
+      return [{ filename: decodeXml(filename), lines }];
+    });
+    return { sources, files };
+  };
+
+  // A line counts as covered when any job ran it, so reports merge by max hits.
+  const addReport = (index, { sources, files }) => {
+    for (const { filename, lines } of files) {
+      for (const key of sources.length ? sources.map((s) => `${s}/${filename}`) : [filename]) {
+        const merged = index.get(key) ?? new Map();
+        for (const [number, hits] of lines) merged.set(number, Math.max(merged.get(number) ?? 0, hits));
+        index.set(key, merged);
+      }
+    }
+  };
+
+  // Reports hold runner paths (/home/runner/work/<repo>/<repo>/<path>); the shortest key ending in the PR path is the repo-root one.
+  // A bare filename is only trusted when it's unambiguous, so a same-named file in another package never lends coverage.
+  const matchCoverage = (path, index) => {
+    const keys = [...index.keys()];
+    const strong = keys.filter((k) => k === path || k.endsWith(`/${path}`)).sort((a, b) => a.length - b.length);
+    if (strong.length) return index.get(strong[0]);
+    const weak = keys.filter((k) => path.endsWith(`/${k}`));
+    return weak.length === 1 ? index.get(weak[0]) : null;
+  };
+
+  const fileCoverage = (added, lines) => {
+    if (!lines) return null;
+    const measured = added.filter((line) => lines.has(line));
+    return { measured: measured.length, missed: measured.filter((line) => !lines.get(line)) };
+  };
+
+  const formatPct = (covered, measured) => `${Math.floor((100 * covered) / measured)}%`;
+
+  const coverageTone = (pct, threshold, margin) => (pct >= threshold ? "ok" : pct >= threshold - margin ? "warn" : "bad");
+  // #endregion coverage-core
+
   const NPM_SECTION = /^(dependencies|devDependencies|peerDependencies|optionalDependencies)$/;
   const NPM_VERSION = /^([~^<>=*]|v?\d|latest$|next$|(workspace|npm|file|link|portal|catalog|github|https?|git(\+[a-z]+)?):)/;
   const NOT_PACKAGES = new Set(["version", "node", "npm", "yarn", "pnpm", "python", "requires-python"]);
