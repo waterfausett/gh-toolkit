@@ -20,7 +20,7 @@ No token needed: it reads GitHub through your already signed-in browser session.
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
 2. Open [gh-pr-review-toolkit.user.js](https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js) and click **Install**. The optional [Actions workflow filter](https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-actions-workflow-filter.user.js), which adds a filter box to the workflows sidebar on Actions pages, installs the same way.
-3. Open a PR. Tampermonkey will ask to allow connections to `github.com`, `raw.githubusercontent.com` and `patch-diff.githubusercontent.com`; allow them.
+3. Open a PR. Tampermonkey will ask to allow connections to `github.com`, `raw.githubusercontent.com`, `patch-diff.githubusercontent.com` and `blob.core.windows.net` (where GitHub serves Actions artifacts, for new-line coverage); allow them.
 
 ### 🔄 Updates
 
@@ -59,6 +59,7 @@ Every feature has a toggle in the settings modal, opened with the ⚙ in the pan
 | <kbd>Alt</kbd>+<kbd>N</kbd> / <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> | Next / previous unviewed file |
 | <kbd>Alt</kbd>+<kbd>J</kbd> / <kbd>Alt</kbd>+<kbd>K</kbd> | Next / previous unresolved thread |
 | <kbd>Alt</kbd>+<kbd>L</kbd> / <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> | Next / previous debug leftover |
+| <kbd>Alt</kbd>+<kbd>U</kbd> / <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>U</kbd> | Next / previous uncovered new line |
 | <kbd>Alt</kbd>+<kbd>C</kbd> | Copy selected code as a quote with a link |
 | <kbd>Alt</kbd>+<kbd>G</kbd> | Turn selected lines into a suggestion comment |
 | <kbd>Alt</kbd>+<kbd>/</kbd> | Show enabled shortcuts |
@@ -255,6 +256,40 @@ On the Files tab a **N leftovers** badge also sits before GitHub's "N / M viewed
 </details>
 
 <details>
+<summary><b>New-line coverage</b> — how much of the code the PR adds is run by tests</summary>
+<br>
+
+Reads the Cobertura XML coverage reports your CI already uploads as Actions artifacts, and checks them against the PR's added lines only. Coverage of lines the PR didn't touch is ignored. Reports from several jobs are merged: a line counts as covered if any job ran it. Blank lines, comments and anything else the report doesn't count as code are left out of the percentage.
+
+- Each changed source file gets a **NN% covered** badge (hover for the missed line numbers), or **no coverage data** when no report mentions it. Test, docs, config and generated files get nothing.
+- Uncovered new lines get a red mark in the gutter. <kbd>Alt</kbd>+<kbd>U</kbd> / <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>U</kbd>, or the **N uncovered** badge next to "N / M viewed", jumps between them.
+- The panel's **New-line coverage** section shows the PR total, the CI run it came from, and the files that need attention, worst first: source files with no data, then files by missed lines.
+
+Coverage is only computed once every Actions job on the PR's head commit has finished. While CI runs, the panel says it's waiting (in repos where coverage has been seen before) and checks again every minute. Coverage from an earlier commit is never shown on the current diff.
+
+| Config | Default | Meaning |
+|---|---|---|
+| `coverageArtifactPattern` | `"cov"` | Regex (case-insensitive) an artifact name must match to be downloaded. |
+| `coverageThreshold` | `80` | At or above this percentage a badge is green. |
+| `coverageWarnMargin` | `10` | Within this many points below the threshold it's amber; below that, red. |
+
+**What CI needs to do:**
+
+- Upload Cobertura XML (pytest-cov's `--cov-report=xml`, or Vitest/Jest's `cobertura` reporter) with `actions/upload-artifact`, in an artifact whose name matches `coverageArtifactPattern`. Artifacts over 50 MB are skipped.
+- Check out the PR's head commit, not GitHub's default test-merge commit, or line numbers can drift when the base branch has moved:
+
+  ```yaml
+  - uses: actions/checkout@v4
+    with:
+      ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+  ```
+
+Only Cobertura is read for now. Support for Istanbul's `coverage-final.json` (Vitest with `@vitest/coverage-v8` and the `json` reporter) is planned.
+
+**What's stored:** per PR, one entry with the head commit SHA, a hash of the CI job ids, and per file a salted hash of the path with its measured and missed line numbers. No paths, code or report content. A new head commit replaces the entry, and entries are pruned after 7 days. Each repo where coverage has been found also keeps a timestamp under a salted hash, pruned after 90 days. Downloaded artifacts are read in memory and never saved.
+</details>
+
+<details>
 <summary><b>Dependency changes</b> — packages added, removed and bumped</summary>
 <br>
 
@@ -315,13 +350,16 @@ Each chip is an ordinary query: GitHub's Pull requests search ORs the `#n` refs,
 
 ## 📡 How data is loaded
 
-Up to three requests per PR, made by Tampermonkey with your GitHub session cookies:
+Up to three requests per PR, plus the coverage requests below, made by Tampermonkey with your GitHub session cookies:
 
 | Request | Used for |
 |---|---|
 | `/<owner>/<repo>/pull/<n>.diff` | The file list, per-file additions and deletions, and blob SHAs (from the diff's `index` lines). The same pass flags whitespace-only and rename-only files, scans added lines for debug leftovers and reads dependency manifests; only those results are kept, not the diff text. |
 | `/<owner>/<repo>/raw/HEAD/.github/CODEOWNERS` | Ownership (falling back to `CODEOWNERS` and `docs/CODEOWNERS`). |
-| `/<owner>/<repo>/pull/<n>/commits` | With `Accept: application/json`, for the PR's commit list and head SHA (only while "New commits since your last look" is on). This is roughly 2 KB per commit. |
+| `/<owner>/<repo>/pull/<n>/commits` | With `Accept: application/json`, for the PR's commit list and head SHA (while "New commits since your last look" or "New-line coverage" is on). This is roughly 2 KB per commit. |
+| `/<owner>/<repo>/commit/<head>/status-details` | New-line coverage: JSON listing the head commit's checks, to tell whether CI has finished and which Actions runs it used. |
+| `/<owner>/<repo>/actions/runs/<id>` | New-line coverage: each run's page, for its artifact names and sizes. Only after CI has finished, and once per head commit. |
+| `/<owner>/<repo>/actions/runs/<id>/artifacts/<id>` | New-line coverage: the matching artifacts, 3 at a time. GitHub redirects these to `*.blob.core.windows.net`. They're unzipped in memory and only the line numbers are kept. |
 
 On PR lists, the commit list request is also made for each listed PR you have a last look for (4 at a time, cached for 5 minutes). Nothing else is fetched off a PR.
 
@@ -331,6 +369,15 @@ On PR lists, the commit list request is also made for each listed PR you have a 
 ## 🔧 Maintenance notes
 
 GitHub's DOM changes. These notes say where each feature hooks in, so you know where to look when one stops working.
+
+<details>
+<summary><b>New-line coverage and its tests</b></summary>
+<br>
+
+The parsing and matching code (unzipping, Cobertura, path matching, CI status, artifact rows) sits between `// #region coverage-core` and `// #endregion coverage-core` and touches no DOM, `GM_*` or toolkit state. `node --test tests/` runs it in Node against fixtures in `tests/fixtures/coverage/`, which were saved from real GitHub pages. Keep that region free of outside references, or the tests can't load it.
+
+CI state comes from `/commit/<sha>/status-details` (`parseStatusDetails`): Actions jobs are the entries whose `targetUrl` contains `/actions/runs/<run>/job/<job>`. Artifacts come from the run page's rows carrying `data-artifact-id` (`parseArtifactRows`). If coverage stops loading, re-save those two pages as fixtures and see which parser no longer matches.
+</details>
 
 <details>
 <summary><b>Per-file features and the file tree</b></summary>
