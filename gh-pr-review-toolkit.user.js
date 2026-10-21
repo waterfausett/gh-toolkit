@@ -3133,11 +3133,26 @@
   };
 
   const SAVED_DRAG_TYPE = "text/x-prr-saved-search";
+  const EXACT_REFS_TIP = `${EXACT_REFS} is added by the PR list chips to help ensure we only match the targeted PR(s)`;
+
+  // The search box draws its text as a highlighted overlay with a span per word, so the tag's span can be dimmed; the input on top gets the tooltip.
+  const markExactRefs = (input) => {
+    for (const span of input.closest(".styled-input-container")?.querySelectorAll(".styled-input-content .text-block") ?? []) {
+      span.classList.toggle("prr-exact-refs", span.textContent === EXACT_REFS);
+    }
+    const has = input.value.split(/\s+/).includes(EXACT_REFS);
+    if (has && !input.title) {
+      input.title = EXACT_REFS_TIP;
+    } else if (!has && input.title === EXACT_REFS_TIP) {
+      input.removeAttribute("title");
+    }
+  };
 
   const placeSavedSearches = () => {
     const m = location.pathname.match(REPO_PULLS_PAGE);
     const input = document.getElementById("repo-pulls-dashboard-filter-input");
     const host = input?.closest("[role='search']");
+    if (m && input) markExactRefs(input);
     const existing = document.getElementById("prr-saved");
     const saving = config.features.savedSearches;
     const chips = m ? listChips(m[1], m[2]) : [];
@@ -3369,6 +3384,7 @@
     .prr-list-chip { cursor: default; background: var(--bgColor-muted, #f6f8fa); }
     .prr-list-chip:hover, .prr-list-chip:focus-within { padding-right: 10px; }
     .prr-list-count { margin-left: 5px; color: var(--fgColor-muted, #656d76); font-variant-numeric: tabular-nums; }
+    .prr-exact-refs { color: var(--fgColor-muted, #656d76); opacity: 0.6; }
     .prr-saved-sep { width: 1px; height: 16px; margin: 0 2px; background: var(--borderColor-default, #d0d7de); }
     .prr-marks { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; vertical-align: middle; }
     .prr-marks .prr-mark-btn { margin: 0; line-height: 22px; }
