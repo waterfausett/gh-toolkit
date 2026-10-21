@@ -27,7 +27,7 @@ No token needed: it reads GitHub through your already signed-in browser session.
 Installed scripts update themselves from this repo through `@updateURL`. Tampermonkey checks on its own schedule (Settings → Script Update), or immediately from Dashboard → "Check for userscript updates".
 
 > [!IMPORTANT]
-> Tampermonkey only updates when `@version` increases, so bump it with every change you push.
+> Tampermonkey only updates when `@version` increases. A GitHub Action bumps the patch version of every changed script on each push to `master`; bump `@version` yourself in the same push for a minor or major release, and the action will leave that script alone.
 
 Config is kept in Tampermonkey storage and survives updates. Edits made in the Tampermonkey editor are overwritten by the next update, so make changes in the repo.
 

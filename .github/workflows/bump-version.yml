@@ -1,0 +1,67 @@
+name: Bump userscript versions
+
+on:
+  push:
+    branches: [master]
+    paths: ['*.user.js']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bump-version
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    # Pushes made with GITHUB_TOKEN don't trigger workflows, but guard anyway.
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump @version in changed scripts
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          # A new branch or force-push can leave BEFORE missing; fall back to the parent commit.
+          if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            BEFORE=$(git rev-parse HEAD^)
+          fi
+
+          bumped=()
+          for f in $(git diff --name-only "$BEFORE" HEAD -- '*.user.js'); do
+            [ -f "$f" ] || continue
+            # Leave scripts alone when the push already changed their @version by hand.
+            if git diff "$BEFORE" HEAD -- "$f" | grep -qE '^[+-]// @version'; then
+              echo "$f: @version already changed, skipping"
+              continue
+            fi
+            old=$(sed -nE 's#^// @version[[:space:]]+([0-9.]+).*#\1#p' "$f" | head -1)
+            if [ -z "$old" ]; then
+              echo "$f: no @version found, skipping"
+              continue
+            fi
+            IFS=. read -r major minor patch <<< "$old"
+            new="$major.$minor.$((${patch:-0} + 1))"
+            sed -i -E "0,/^\/\/ @version/s#^(// @version[[:space:]]+)[0-9.]+#\1$new#" "$f"
+            echo "$f: $old -> $new"
+            bumped+=("$f $new")
+          done
+
+          if [ ${#bumped[@]} -eq 0 ]; then
+            echo "Nothing to bump"
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          msg=$(printf '%s, ' "${bumped[@]}")
+          git commit -am "Bump version: ${msg%, }"
+          # master may have moved while this ran; rebase onto it before pushing.
+          git pull --rebase origin master
+          git push origin HEAD:master
