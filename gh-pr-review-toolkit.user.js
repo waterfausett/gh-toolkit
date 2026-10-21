@@ -17,6 +17,7 @@
 // @connect      github.com
 // @connect      raw.githubusercontent.com
 // @connect      patch-diff.githubusercontent.com
+// @connect      blob.core.windows.net
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -49,6 +50,7 @@
       suggestFromSelection: true,
       collapseTrivial: true,
       leftovers: true,
+      coverage: true,
       depSummary: true,
       pendingReviewGuard: true,
       sinceLastLook: true,
@@ -85,6 +87,9 @@
       "\\.min\\.(js|css)$",
       "(^|/)dist/",
     ],
+    coverageArtifactPattern: "cov",
+    coverageThreshold: 80,
+    coverageWarnMargin: 10,
     adoBase: "",
     myOwners: [],
     minePatterns: [],
@@ -205,6 +210,7 @@
 
   const DAY_MS = 24 * 60 * 60 * 1000;
   const PR_RETENTION_MS = 90 * DAY_MS;
+  const COVERAGE_RETENTION_MS = 7 * DAY_MS;
 
   const touchPr = (id) => {
     const lastSeen = store.get("prLastSeen", {});
@@ -222,7 +228,13 @@
       GM_deleteValue(`v3:changedFilter:${id}`);
       GM_deleteValue(`v3:lastLook:${id}`);
       GM_deleteValue(`v3:summary:${id}`);
+      GM_deleteValue(`v3:coverage:${id}`);
       delete lastSeen[id];
+    }
+    // Coverage is only a shortcut around re-downloading artifacts, so it expires much sooner than other PR data.
+    for (const key of GM_listValues()) {
+      if (key.startsWith("v3:coverage:") && now - (GM_getValue(key)?.at ?? 0) >= COVERAGE_RETENTION_MS) GM_deleteValue(key);
+      else if (key.startsWith("v3:coverageRepo:") && now - (GM_getValue(key) ?? 0) >= PR_RETENTION_MS) GM_deleteValue(key);
     }
     store.set("prLastSeen", lastSeen);
     const pending = store.get("pendingReviews", {});
@@ -567,14 +579,17 @@
       const { renamed, similarity, hunks, other, whitespaceOnly, oldDeps, newDeps } = scratch;
       if (renamed && !hunks && !other && similarity === 100) current.trivial = "renamed";
       else if (hunks && whitespaceOnly && !other) current.trivial = "whitespace";
-      if (current.trivial) current.leftovers = [];
+      if (current.trivial) {
+        current.leftovers = [];
+        current.addedLines = [];
+      }
       current.deps = diffDeps(oldDeps, newDeps);
     };
     for (const line of text.split("\n")) {
       if (line.startsWith("diff --git ")) {
         endFile();
         const m = line.match(/^diff --git a\/(.+) b\/(.+)$/);
-        current = { filename: m ? m[2] : line.slice(11), sha: "", additions: 0, deletions: 0, trivial: "", leftovers: [], deps: [] };
+        current = { filename: m ? m[2] : line.slice(11), sha: "", additions: 0, deletions: 0, trivial: "", leftovers: [], deps: [], addedLines: [] };
         scratch = { renamed: false, similarity: 0, hunks: 0, other: false, whitespaceOnly: true, oldDeps: new Map(), newDeps: new Map() };
         files.push(current);
       } else if (!current) {
@@ -604,7 +619,10 @@
       } else if (line[0] !== "\\") {
         const sign = line[0] ?? " ";
         const content = line.slice(1);
-        if (sign === "+") current.additions += 1;
+        if (sign === "+") {
+          current.additions += 1;
+          current.addedLines.push(hunk.newLine);
+        }
         else if (sign === "-") current.deletions += 1;
         if (scratch.whitespaceOnly) {
           const stripped = stripWs(content);
@@ -671,6 +689,149 @@
       }),
     );
 
+  const COVERAGE_POLL_MS = 60_000;
+  const MAX_ARTIFACT_MB = 50;
+  const DOWNLOAD_CONCURRENCY = 3;
+  let coveragePoll = 0;
+  let coverageRun = null;
+
+  const fetchBuffer = (url) =>
+    new Promise((resolve) => {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        responseType: "arraybuffer",
+        timeout: 120_000,
+        onload: (res) => resolve(res.status === 200 && res.response?.byteLength ? res.response : null),
+        onerror: () => resolve(null),
+        ontimeout: () => resolve(null),
+      });
+    });
+
+  const coverageKey = (pr) => `v3:coverage:${digest(pr.key)}`;
+  const coverageRepoKey = (pr) => `v3:coverageRepo:${digest(`${pr.owner}/${pr.repo}`)}`;
+
+  const coverageFiles = () => (state.files ?? []).filter((f) => f.addedLines.length && !f.trivial && !isGenerated(f.filename));
+
+  // The cache holds only salted path hashes and numbers; paths are recovered by hashing the PR's current files.
+  const hydrateCoverage = (entry) => {
+    const byDigest = new Map(coverageFiles().map((f) => [digest(f.filename), f.filename]));
+    return {
+      files: new Map(Object.entries(entry.files).flatMap(([id, value]) => (byDigest.has(id) ? [[byDigest.get(id), value]] : []))),
+      noData: entry.noData.flatMap((id) => (byDigest.has(id) ? [byDigest.get(id)] : [])),
+    };
+  };
+
+  const setCoverage = (pr, coverage) => {
+    if (state.pr?.key !== pr.key) return;
+    state.coverage = coverage;
+    state.version += 1;
+    scan();
+    renderPanel(true);
+  };
+
+  const loadCoverage = (pr) => {
+    if (!config.features.coverage || coverageRun?.key === pr.key) return coverageRun?.promise;
+    clearTimeout(coveragePoll);
+    const promise = computeCoverage(pr)
+      .catch((error) => setCoverage(pr, { status: "error", error: error?.message || "unexpected error" }))
+      .finally(() => {
+        if (coverageRun?.promise === promise) coverageRun = null;
+      });
+    coverageRun = { key: pr.key, promise };
+    return promise;
+  };
+
+  const computeCoverage = async (pr) => {
+    const base = `https://github.com/${pr.owner}/${pr.repo}`;
+    const head = state.commitOids?.at(-1) ?? (await loadCommitOids(pr))?.at(-1);
+    if (!head) return setCoverage(pr, { status: "error", error: "couldn't find the PR's head commit" });
+    let details = null;
+    try {
+      details = JSON.parse(
+        (await fetchText(`${base}/commit/${head}/status-details`, {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+          "GitHub-Verified-Fetch": "true",
+        })) ?? "null",
+      );
+    } catch {}
+    if (!details) return setCoverage(pr, { status: "error", head, error: "couldn't read the commit's checks" });
+    const { pending, failed, runIds, jobIds } = parseStatusDetails(details);
+    // Re-running a job creates new job ids, so the stamp changes and a cached result is recomputed.
+    const stamp = digest(jobIds.join());
+
+    const cached = store.get(coverageKey(pr));
+    if (cached?.head === head && cached.stamp === stamp) {
+      return setCoverage(pr, cached.none ? { status: "none", head } : { status: "ready", head, run: cached.run, ...hydrateCoverage(cached) });
+    }
+    // A partial merge would show lines as missed that a still-running job covers, so nothing is computed until CI settles.
+    if (pending) {
+      setCoverage(pr, { status: store.get(coverageRepoKey(pr)) ? "waiting" : "quiet", head });
+      coveragePoll = setTimeout(() => state.pr?.key === pr.key && loadCoverage(pr), COVERAGE_POLL_MS);
+      return;
+    }
+
+    setCoverage(pr, { status: "loading", head });
+    const pattern = new RegExp(config.coverageArtifactPattern, "i");
+    const artifacts = [];
+    for (const runId of runIds) {
+      const html = await fetchText(`${base}/actions/runs/${runId}`);
+      for (const row of html ? parseArtifactRows(html) : []) if (pattern.test(row.name)) artifacts.push({ ...row, runId });
+    }
+    const wanted = artifacts.filter((a) => (a.sizeMB ?? 0) <= MAX_ARTIFACT_MB);
+    let incomplete = failed || wanted.length < artifacts.length;
+    if (!wanted.length) {
+      if (!artifacts.length) store.set(coverageKey(pr), { head, stamp, at: Date.now(), none: true });
+      return setCoverage(pr, artifacts.length ? { status: "error", head, error: `coverage artifacts are over ${MAX_ARTIFACT_MB} MB` } : { status: "none", head });
+    }
+
+    const index = new Map();
+    let done = 0;
+    let downloaded = 0;
+    const queue = [...wanted];
+    const worker = async () => {
+      for (let artifact = queue.shift(); artifact; artifact = queue.shift()) {
+        const buffer = await fetchBuffer(`${base}/actions/runs/${artifact.runId}/artifacts/${artifact.id}`);
+        try {
+          if (!buffer) throw new Error("download failed");
+          for (const { text } of await unzipText(buffer, (name) => /\.xml$/i.test(name))) {
+            if (isCobertura(text)) addReport(index, parseCobertura(text));
+          }
+          downloaded += 1;
+        } catch {
+          incomplete = true;
+        }
+        done += 1;
+        setCoverage(pr, { status: "loading", head, progress: [done, wanted.length] });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, wanted.length) }, worker));
+    if (!downloaded) return setCoverage(pr, { status: "error", head, error: "couldn't download the coverage artifacts" });
+
+    const files = new Map();
+    const noData = [];
+    for (const { filename, addedLines } of coverageFiles()) {
+      const result = fileCoverage(addedLines, matchCoverage(filename, index));
+      if (result) files.set(filename, result);
+      else if (categoryOf(filename) === "source") noData.push(filename);
+    }
+    const run = wanted[0].runId;
+    store.set(coverageRepoKey(pr), Date.now());
+    // A failed job or unreadable artifact may be fixed by a re-run on the same head, so partial results aren't cached.
+    if (!incomplete) {
+      store.set(coverageKey(pr), {
+        head,
+        stamp,
+        at: Date.now(),
+        run,
+        files: Object.fromEntries([...files].map(([path, value]) => [digest(path), value])),
+        noData: noData.map(digest),
+      });
+    }
+    setCoverage(pr, { status: "ready", head, run, incomplete, files, noData });
+  };
+
   const state = {
     pr: null,
     files: null,
@@ -682,6 +843,7 @@
     byPath: new Map(),
     pathToId: new Map(),
     commitOids: null,
+    coverage: null,
   };
   const userExpanded = new Set();
   let panelOpen = store.get("panelOpen", true);
@@ -758,6 +920,7 @@
     leftoverCursor = -1;
     applyChangedFilter();
     renderPanel(true);
+    loadCoverage(pr);
   };
 
   const resetState = (pr) => {
@@ -772,7 +935,9 @@
       byPath: new Map(),
       pathToId: new Map(),
       commitOids: null,
+      coverage: null,
     });
+    clearTimeout(coveragePoll);
     userExpanded.clear();
     threadCursor = -1;
     leftoverCursor = -1;
