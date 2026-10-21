@@ -11,8 +11,8 @@ const source = readFileSync(new URL("gh-pr-review-toolkit.user.js", root), "utf8
 const start = source.indexOf("// #region coverage-core");
 const end = source.indexOf("// #endregion coverage-core");
 if (start < 0 || end < 0) throw new Error("coverage-core region markers not found in gh-pr-review-toolkit.user.js");
-const { unzipText, isCobertura, parseCobertura, addReport, matchCoverage, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows } = new Function(
-  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, addReport, matchCoverage, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows };`,
+const { unzipText, isCobertura, parseCobertura, addReport, matchCoverage, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary } = new Function(
+  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, addReport, matchCoverage, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary };`,
 )();
 
 const coverageXml = () => readFileSync(fixture("pkg-coverage.xml"), "utf8");
@@ -118,4 +118,19 @@ test("parseArtifactRows reads id, name and size", () => {
   assert.equal(rows.length, 3);
   assert.deepEqual(rows.find((r) => r.id === "12370044095"), { id: "12370044095", name: "Packages", sizeMB: 2.1 });
   assert.deepEqual(parseArtifactRows("<html></html>"), []);
+});
+
+test("coverageSummary totals measured lines and orders the attention list worst first", () => {
+  const files = new Map([
+    ["a/full.py", { measured: 10, missed: [] }],
+    ["a/some.py", { measured: 10, missed: [3] }],
+    ["a/many.py", { measured: 20, missed: [1, 2, 9] }],
+    ["a/comments.py", { measured: 0, missed: [] }],
+  ]);
+  const s = coverageSummary(files, ["a/new.py"]);
+  assert.equal(s.measured, 40);
+  assert.equal(s.covered, 36);
+  assert.equal(s.fully, 1);
+  assert.deepEqual(s.attention.map((r) => r.path), ["a/new.py", "a/many.py", "a/some.py"]);
+  assert.equal(s.attention[0].noData, true);
 });

@@ -133,6 +133,7 @@
         { key: "copyPermalink", label: "Copy selected lines as a quote with link", hint: "Alt+C" },
         { key: "collapseTrivial", label: "Collapse whitespace-only and rename-only files" },
         { key: "leftovers", label: "Flag debug leftovers in added lines", hint: "Alt+L / Alt+Shift+L", note: "console.log, debugger, TODO, .only( …: leftoverPatterns" },
+        { key: "coverage", label: "New-line coverage from CI artifacts", hint: "Alt+U / Alt+Shift+U", note: "Cobertura XML in Actions artifacts; coverageArtifactPattern, coverageThreshold, coverageWarnMargin" },
         { key: "sinceLastLook", label: "New commits since your last look", note: "Your last look is when you last marked a file Viewed" },
       ],
     },
@@ -416,6 +417,23 @@
   const formatPct = (covered, measured) => `${Math.floor((100 * covered) / measured)}%`;
 
   const coverageTone = (pct, threshold, margin) => (pct >= threshold ? "ok" : pct >= threshold - margin ? "warn" : "bad");
+
+  // Source files with no data come first: they may be entirely untested and would otherwise go unnoticed.
+  const coverageSummary = (files, noData) => {
+    const values = [...files.values()];
+    const measured = values.reduce((sum, f) => sum + f.measured, 0);
+    const missed = values.reduce((sum, f) => sum + f.missed.length, 0);
+    const withMisses = [...files]
+      .filter(([, f]) => f.missed.length)
+      .sort(([a, x], [b, y]) => y.missed.length - x.missed.length || a.localeCompare(b))
+      .map(([path, f]) => ({ path, ...f }));
+    return {
+      measured,
+      covered: measured - missed,
+      fully: values.filter((f) => f.measured && !f.missed.length).length,
+      attention: [...noData.map((path) => ({ path, noData: true })), ...withMisses],
+    };
+  };
 
   const ACTIONS_JOB = /\/actions\/runs\/(\d+)\/job\/(\d+)/;
   const PASSING_STATES = new Set(["success", "skipped", "neutral"]);
@@ -725,6 +743,7 @@
   const setCoverage = (pr, coverage) => {
     if (state.pr?.key !== pr.key) return;
     state.coverage = coverage;
+    uncoveredCursor = -1;
     state.version += 1;
     scan();
     renderPanel(true);
@@ -850,6 +869,9 @@
   let lastSignature = "";
   let threadCursor = -1;
   let leftoverCursor = -1;
+  let uncoveredCursor = -1;
+  let coverageExpanded = false;
+  let markedVersion = "";
 
   const codeownersRegex = (pattern) => {
     const anchored = pattern.startsWith("/") || pattern.slice(0, -1).includes("/");
@@ -918,6 +940,7 @@
       commitOids,
     });
     leftoverCursor = -1;
+    uncoveredCursor = -1;
     applyChangedFilter();
     renderPanel(true);
     loadCoverage(pr);
@@ -941,6 +964,8 @@
     userExpanded.clear();
     threadCursor = -1;
     leftoverCursor = -1;
+    uncoveredCursor = -1;
+    coverageExpanded = false;
     applyNoiseDefault();
   };
 
@@ -1109,6 +1134,12 @@
 
   const trivialReason = (path) => (config.features.collapseTrivial && TRIVIAL_REASONS[state.byPath.get(path)?.trivial]) || "";
 
+  const readyCoverage = () => (config.features.coverage && state.coverage?.status === "ready" ? state.coverage : null);
+
+  const COVERAGE_BADGE_TONES = { ok: "done", warn: "warn", bad: "bad" };
+  const coverageBadge = (text, covered, measured) =>
+    badge(text, COVERAGE_BADGE_TONES[coverageTone((100 * covered) / measured, config.coverageThreshold, config.coverageWarnMargin)]);
+
   const fileLeftovers = (path) => (config.features.leftovers && !isGenerated(path) && state.byPath.get(path)?.leftovers) || [];
 
   const setCollapsed = ({ el, actions }, collapsed) => {
@@ -1158,6 +1189,15 @@
     if (leftovers.length) {
       const title = leftovers.map((item) => `L${item.line} ${item.label}: ${item.text}`).join("\n");
       actions.prepend(Object.assign(badge(`${leftovers.length} leftover${leftovers.length === 1 ? "" : "s"}`, "warn"), { title }));
+    }
+    const coverage = readyCoverage();
+    const covered = coverage?.files.get(path);
+    if (covered?.measured) {
+      const { measured, missed } = covered;
+      const title = missed.length ? `Missed new lines: ${missed.join(", ")}` : "All measured new lines covered";
+      actions.prepend(Object.assign(coverageBadge(`${formatPct(measured - missed.length, measured)} covered`, measured - missed.length, measured), { title }));
+    } else if (coverage?.noData.includes(path)) {
+      actions.prepend(Object.assign(badge("no coverage data", "bad"), { title: "Changed source file not found in any coverage report" }));
     }
     if (collapseReason) {
       const chevron = findChevron(entry);
@@ -1952,7 +1992,7 @@
     attempt();
   };
 
-  const jumpToLeftover = (item) => {
+  const jumpToLine = (item) => {
     const id = state.pathToId.get(item.path);
     if (FILES_PATH.test(location.pathname)) revealLine(item);
     else goTo(`${tabHref(NAV_TABS[3])}${id ? `#${id}R${item.line}` : ""}`);
@@ -1966,7 +2006,38 @@
     }
     leftoverCursor =
       leftoverCursor < 0 ? (direction > 0 ? 0 : items.length - 1) : (leftoverCursor + direction + items.length) % items.length;
-    jumpToLeftover(items[leftoverCursor]);
+    jumpToLine(items[leftoverCursor]);
+  };
+
+  const uncoveredList = () => {
+    const coverage = readyCoverage();
+    if (!coverage) return [];
+    return (state.files ?? []).flatMap((file) => (coverage.files.get(file.filename)?.missed ?? []).map((line) => ({ path: file.filename, line })));
+  };
+
+  const stepUncovered = (direction) => {
+    const items = uncoveredList();
+    if (!items.length) {
+      toast(readyCoverage() ? "No uncovered new lines" : "Coverage not loaded yet");
+      return;
+    }
+    uncoveredCursor =
+      uncoveredCursor < 0 ? (direction > 0 ? 0 : items.length - 1) : (uncoveredCursor + direction + items.length) % items.length;
+    jumpToLine(items[uncoveredCursor]);
+  };
+
+  // GitHub renders diff rows lazily, so marks are re-applied on every scan; a new coverage result clears the old ones first.
+  const markUncovered = () => {
+    const coverage = readyCoverage();
+    const key = coverage ? String(state.version) : "";
+    if (markedVersion !== key) {
+      document.querySelectorAll(".prr-uncovered").forEach((node) => node.classList.remove("prr-uncovered"));
+      markedVersion = key;
+    }
+    if (!coverage || !FILES_PATH.test(location.pathname)) return;
+    for (const entry of fileEntries()) {
+      for (const line of coverage.files.get(entry.path)?.missed ?? []) findLineRow(entry, line)?.classList.add("prr-uncovered");
+    }
   };
 
   const discoverAdoBase = () => {
@@ -2338,7 +2409,7 @@
       .join("\n");
   };
 
-  const INLINE_CLASSES = ["prr-inline-progress", "prr-inline-leftovers", "prr-inline-deps"];
+  const INLINE_CLASSES = ["prr-inline-progress", "prr-inline-leftovers", "prr-inline-deps", "prr-inline-coverage"];
   const isInline = (node) => INLINE_CLASSES.some((cls) => node.classList?.contains(cls));
 
   const isIconOnly = (node) =>
@@ -2353,7 +2424,7 @@
     let el = counter;
     const text = (node) => [...node.childNodes].filter((child) => !isInline(child)).map((child) => child.textContent).join("");
     const wrapsOnlyCounter = (node) =>
-      node !== document.body && VIEWED_COUNTER.test(text(node)) && !node.querySelector("button:not(.prr-inline-leftovers, .prr-inline-deps), a, [role='button']");
+      node !== document.body && VIEWED_COUNTER.test(text(node)) && !node.querySelector("button:not(.prr-inline-leftovers, .prr-inline-deps, .prr-inline-coverage), a, [role='button']");
     while (el.parentElement && wrapsOnlyCounter(el.parentElement)) el = el.parentElement;
     let prev = el.previousElementSibling;
     while (prev && isInline(prev)) prev = prev.previousElementSibling;
@@ -2369,7 +2440,8 @@
     const both = here ? snapshot?.progressBoth : null;
     const leftovers = here && config.features.leftovers ? leftoverList() : [];
     const deps = here && config.features.depSummary ? allDeps() : [];
-    const counter = both || leftovers.length || deps.length ? findViewedCounter() : null;
+    const uncovered = here ? uncoveredList() : [];
+    const counter = both || leftovers.length || deps.length || uncovered.length ? findViewedCounter() : null;
     const text = both ? progressText(...both) : "";
     const title = both ? progressTitle(...both) : "";
     syncInline("prr-inline-progress", counter, text && `${text}|${title}`, () => h("span", { class: "prr-inline-progress", title }, text), "after");
@@ -2393,6 +2465,19 @@
       counter && (document.querySelector(".prr-inline-leftovers") ?? counterGroup(counter)),
       depText && `${depText}|${depTitle}`,
       () => h("button", { class: "prr-badge prr-muted prr-inline-deps", type: "button", title: depTitle, onclick: showDepsInPanel }, depText),
+      "before",
+    );
+    // Each inline badge anchors on the one placed before it, so they never compete for the same spot.
+    syncInline(
+      "prr-inline-coverage",
+      counter && (document.querySelector(".prr-inline-deps") ?? document.querySelector(".prr-inline-leftovers") ?? counterGroup(counter)),
+      uncovered.length ? String(uncovered.length) : "",
+      () =>
+        h(
+          "button",
+          { class: "prr-badge prr-warn prr-inline-coverage", type: "button", title: "New lines no test ran: jump to the next (Alt+U)", onclick: () => stepUncovered(1) },
+          `${uncovered.length} uncovered`,
+        ),
       "before",
     );
   };
@@ -2441,6 +2526,81 @@
     );
 
   const MAX_PANEL_ROWS = 8;
+  const COVERAGE_ROWS = 5;
+
+  const coverageSection = () => {
+    const c = config.features.coverage ? state.coverage : null;
+    if (!c || c.status === "quiet") return null;
+    const title = "New-line coverage";
+    const sha7 = c.head?.slice(0, 7) ?? "";
+    const note = (text) => section(title, h("div", { class: "prr-muted" }, text));
+    if (c.status === "loading") return note(c.progress ? `Loading coverage ${c.progress[0]}/${c.progress[1]}…` : "Loading coverage…");
+    if (c.status === "waiting") return note(`Waiting for CI on ${sha7}…`);
+    if (c.status === "none") return note(`No coverage artifacts for ${sha7} (CI may not upload them, or they've expired)`);
+    if (c.status === "error") return note(`Couldn't load coverage: ${c.error}`);
+
+    const s = coverageSummary(c.files, c.noData);
+    const rowBadge = (row) =>
+      row.noData
+        ? badge("no data", "bad")
+        : coverageBadge(`${formatPct(row.measured - row.missed.length, row.measured)} · ${row.missed.length} missed`, row.measured - row.missed.length, row.measured);
+    const rows = (coverageExpanded ? s.attention : s.attention.slice(0, COVERAGE_ROWS)).map((row) =>
+      h(
+        "a",
+        {
+          href: "#",
+          class: "prr-row",
+          title: row.path,
+          onclick: (e) => {
+            e.preventDefault();
+            if (row.noData) jumpToFile(row.path);
+            else jumpToLine({ path: row.path, line: row.missed[0] });
+          },
+        },
+        h("span", { class: "prr-block" }, row.path.split("/").at(-1)),
+        rowBadge(row),
+      ),
+    );
+    const hidden = s.attention.length - COVERAGE_ROWS;
+    const notMeasured = coverageFiles().filter((f) => !c.files.has(f.filename) && !c.noData.includes(f.filename)).length;
+    const { owner, repo } = state.pr;
+    return inlineSection(
+      title,
+      uncoveredList().length
+        ? h(
+            "span",
+            { class: "prr-seg" },
+            h("button", { class: "prr-btn", type: "button", title: "Alt+Shift+U", onclick: () => stepUncovered(-1) }, "◀ Prev"),
+            h("button", { class: "prr-btn", type: "button", title: "Alt+U", onclick: () => stepUncovered(1) }, "Next ▶"),
+          )
+        : null,
+      h(
+        "div",
+        { class: "prr-row" },
+        s.measured
+          ? coverageBadge(`${formatPct(s.covered, s.measured)} · ${s.covered} / ${s.measured} lines`, s.covered, s.measured)
+          : h("span", { class: "prr-muted" }, "No measured new lines"),
+        h("span", { class: "prr-muted" }, "CI run ", h("a", { href: `/${owner}/${repo}/actions/runs/${c.run}` }, `#${c.run}`), ` · ${sha7}`),
+      ),
+      c.incomplete ? h("div", { class: "prr-warn prr-coverage-note" }, "A CI job failed or an artifact couldn't be read; coverage may be incomplete") : null,
+      ...rows,
+      hidden > 0
+        ? h(
+            "button",
+            {
+              class: "prr-btn",
+              type: "button",
+              onclick: () => {
+                coverageExpanded = !coverageExpanded;
+                renderPanel(true);
+              },
+            },
+            coverageExpanded ? "Show fewer" : `+ ${hidden} more`,
+          )
+        : null,
+      h("div", { class: "prr-muted" }, `${s.fully} file${s.fully === 1 ? "" : "s"} fully covered · ${notMeasured} tests/config not measured`),
+    );
+  };
   const MAX_DEP_ROWS = 25;
 
   const SECTION_TAGS = { devDependencies: "dev", peerDependencies: "peer", optionalDependencies: "optional", dependencies: "" };
@@ -2580,7 +2740,7 @@
                   onclick: (e) => {
                     e.preventDefault();
                     leftoverCursor = index;
-                    jumpToLeftover(item);
+                    jumpToLine(item);
                   },
                 },
                 `${item.path.split("/").at(-1)}:${item.line} `,
@@ -2592,6 +2752,9 @@
         );
       }
     }
+
+    const coverage = coverageSection();
+    if (coverage) out.push(coverage);
 
     if (config.features.depSummary && state.files) {
       const manifests = state.files.filter((file) => file.deps.length);
@@ -2792,6 +2955,8 @@
     { keys: ["Alt", "G"], label: "Suggest a change on the selected lines", feature: "suggestFromSelection", filesOnly: true },
     { keys: ["Alt", "L"], label: "Next debug leftover", feature: "leftovers", filesOnly: true },
     { keys: ["Alt", "Shift", "L"], label: "Previous debug leftover", feature: "leftovers", filesOnly: true },
+    { keys: ["Alt", "U"], label: "Next uncovered new line", feature: "coverage", filesOnly: true },
+    { keys: ["Alt", "Shift", "U"], label: "Previous uncovered new line", feature: "coverage", filesOnly: true },
   ];
 
   const shortcutRow = ({ keys, label, filesOnly }) =>
@@ -2814,6 +2979,7 @@
     state.version += 1;
     scan();
     renderPanel(true);
+    if (state.pr && state.files) loadCoverage(state.pr);
   };
 
   const settingRow = ({ key, label, hint, note }) =>
@@ -3568,6 +3734,7 @@
     placePrMarks();
     pendingReviewCount();
     savePendingReview();
+    markUncovered();
   };
 
   GM_addStyle(`
@@ -3620,10 +3787,10 @@
       padding: 1px 6px; margin-right: 6px; border-radius: 999px; white-space: nowrap; }
     .prr-inline-progress { display: inline-flex; align-items: center; align-self: center; vertical-align: middle; margin-left: 8px; font-size: 12px;
       white-space: nowrap; color: var(--fgColor-muted, #656d76); font-variant-numeric: tabular-nums; }
-    .prr-inline-leftovers, .prr-inline-deps { margin: 0 8px 0 0; font-family: inherit; cursor: pointer; }
-    .prr-inline-leftovers { border: 0; }
+    .prr-inline-leftovers, .prr-inline-deps, .prr-inline-coverage { margin: 0 8px 0 0; font-family: inherit; cursor: pointer; }
+    .prr-inline-leftovers, .prr-inline-coverage { border: 0; }
     .prr-inline-deps { color: var(--fgColor-muted, #656d76); background: transparent; }
-    .prr-inline-leftovers:hover, .prr-inline-deps:hover { text-decoration: underline; }
+    .prr-inline-leftovers:hover, .prr-inline-deps:hover, .prr-inline-coverage:hover { text-decoration: underline; }
     .prr-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-left: 6px; vertical-align: middle;
       font-size: 11px; font-weight: 400; line-height: 16px; }
     .prr-meta .prr-badge { margin-right: 0; text-decoration: none; }
@@ -3641,6 +3808,9 @@
     a.prr-new { background: var(--bgColor-accent-muted, #ddf4ff); color: var(--fgColor-accent, #0969da); }
     a.prr-new:hover { text-decoration: underline; }
     .prr-warn { background: var(--bgColor-attention-muted, #fff8c5); color: var(--fgColor-attention, #9a6700); }
+    .prr-bad { background: var(--bgColor-danger-muted, #ffebe9); color: var(--fgColor-danger, #d1242f); }
+    .prr-coverage-note { padding: 2px 6px; border-radius: 6px; }
+    .prr-uncovered > td:first-child, .prr-uncovered:not(tr) { box-shadow: inset 3px 0 0 var(--fgColor-danger, #d1242f); }
     .prr-tree-dim > div { opacity: .55; }
     .prr-on { font-weight: 600; background: var(--bgColor-accent-muted, #ddf4ff); }
     .prr-badge.prr-muted { border: 1px solid var(--borderColor-default, #d0d7de); }
@@ -3831,6 +4001,11 @@
       if (config.features.leftovers && event.code === "KeyL") {
         event.preventDefault();
         stepLeftover(event.shiftKey ? -1 : 1);
+        return;
+      }
+      if (config.features.coverage && event.code === "KeyU") {
+        event.preventDefault();
+        stepUncovered(event.shiftKey ? -1 : 1);
         return;
       }
     }
