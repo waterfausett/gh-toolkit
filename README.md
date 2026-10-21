@@ -288,6 +288,17 @@ A PR where your pending review has comments gets **✎ 3 unsubmitted**, linking 
 The ticket chips also appear after PR titles in lists, after branch names on the branches page, and after commit messages on commit lists and a single commit's page. They use the same `ticketRules`; branch names match case-insensitively like on a PR. Needs "Ticket chips" on as well.
 </details>
 
+<details>
+<summary><b>Saved searches</b> — one-click filters on a repo's Pull requests page</summary>
+<br>
+
+A row of chips under the search box on `/<owner>/<repo>/pulls`. Build a query with the search box or the Author / Label / Reviews menus, click **☆ Save current** and name it; the chip then loads that query, and is highlighted while it's the one applied. Hover a chip for **✎** (rename it or edit the query by hand) and **×** (delete, with Undo). Drag chips to reorder them.
+
+If you open a chip and then change the filters, it gets a **●** and you're offered **↻ Update "name"** (save the new query over it) or **☆ Save as new**.
+
+Each repo has its own list, stored in Tampermonkey storage under the lowercased `owner/repo`, so it stays in that browser and isn't synced between machines.
+</details>
+
 ## 📡 How data is loaded
 
 Up to three requests per PR, made by Tampermonkey with your GitHub session cookies:
@@ -384,4 +395,11 @@ The pending-review warning reads the count from GitHub's own review button: in t
 <br>
 
 List badges and ticket chips off a PR attach after PR title links (`a[data-hovercard-type="pull_request"]` or the classic `a.js-navigation-open`), branch links (`a[href^="/<owner>/<repo>/tree/"]` whose text is the branch name) and commit links whose text isn't a SHA (`decoratePrLinks`, `decorateBranches`, `decorateCommits`). They go in a `span.prr-meta` right after the link, and each scan rebuilds it if React dropped it. A single commit's page is matched by finding a `main h1` or `.commit-title` whose text starts the message in `document.title`; if GitHub changes that header, the chips there just don't appear.
+</details>
+
+<details>
+<summary><b>Saved searches</b></summary>
+<br>
+
+The chip row (`placeSavedSearches`) is inserted right after the `[role="search"]` wrapper around `#repo-pulls-dashboard-filter-input`, and each scan puts it back if React dropped it. If GitHub renames that input, the row just doesn't appear. The applied query is read from the URL's `q`, falling back to the input's value when there is none. The chip you last opened is kept in `sessionStorage` per repo, which is how a tweaked search knows which chip to offer to update.
 </details>

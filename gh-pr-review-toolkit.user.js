@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.14.1
+// @version      0.15.0
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -54,6 +54,7 @@
       sinceLastLook: true,
       listBadges: true,
       ticketsElsewhere: true,
+      savedSearches: true,
     },
     snippets: {
       nit: "nit: ",
@@ -151,6 +152,7 @@
       features: [
         { key: "listBadges", label: "Review badges in PR lists", note: "Your progress, new commits and unsubmitted reviews, as of your last visit" },
         { key: "ticketsElsewhere", label: "Ticket chips in lists, branches and commits" },
+        { key: "savedSearches", label: "Saved searches on PR lists", note: "Chips under the search box on a repo's Pull requests page" },
       ],
     },
   ];
@@ -985,9 +987,14 @@
     setTimeout(() => el.classList.remove("prr-flash"), 1500);
   };
 
-  const toast = (message, ms = 2000) => {
+  const toast = (message, ms = 2000, action = null) => {
     document.getElementById("prr-toast")?.remove();
-    const el = h("div", { id: "prr-toast" }, message);
+    const el = h(
+      "div",
+      { id: "prr-toast", class: action ? "prr-toast-action" : "" },
+      message,
+      action ? h("button", { type: "button", onclick: () => { el.remove(); action.run(); } }, action.label) : null,
+    );
     document.body.append(el);
     setTimeout(() => el.remove(), ms);
   };
@@ -2897,12 +2904,177 @@
     else document.body.append(box);
   };
 
+  const REPO_PULLS_PAGE = /^\/([^/]+)\/([^/]+)\/pulls(\/|$)/;
+  // Set while the editor is open; scans rebuild the row, so it lives outside the DOM.
+  let savedSearchEdit = null;
+
+  const normalizeQuery = (q) => q.trim().replace(/\s+/g, " ");
+  // GitHub repo URLs are case-insensitive, so the list is keyed by the lowercased owner/repo.
+  const savedSearchRepo = (m) => `${m[1]}/${m[2]}`.toLowerCase();
+  const loadSavedSearches = (repo) => store.get("savedSearches", {})[repo] ?? [];
+  const storeSavedSearches = (repo, list) => {
+    const all = store.get("savedSearches", {});
+    if (list.length) all[repo] = list;
+    else delete all[repo];
+    store.set("savedSearches", all);
+    placeSavedSearches();
+  };
+
+  // The chip last clicked in this tab, so a search tweaked after opening it can offer "Update". Session storage survives goTo's full-load fallback.
+  const savedFromKey = (repo) => `prr-saved-from:${repo}`;
+  const savedFrom = (repo) => {
+    try {
+      return sessionStorage.getItem(savedFromKey(repo));
+    } catch {
+      return null;
+    }
+  };
+  const setSavedFrom = (repo, q) => {
+    try {
+      sessionStorage.setItem(savedFromKey(repo), q);
+    } catch {
+      // Without session storage the chip just doesn't show as changed.
+    }
+  };
+
+  const deleteSavedSearch = (repo, list, index) => {
+    const removed = list[index];
+    storeSavedSearches(repo, list.filter((_, i) => i !== index));
+    toast(`Deleted “${removed.name}”`, 5000, {
+      label: "Undo",
+      run: () => {
+        const now = loadSavedSearches(repo);
+        storeSavedSearches(repo, [...now.slice(0, index), removed, ...now.slice(index)]);
+      },
+    });
+  };
+
+  const savedSearchEditor = (repo, list) => {
+    const { index, name, q } = savedSearchEdit;
+    const nameInput = h("input", { class: "prr-saved-input", type: "text", value: name, placeholder: "e.g. Mobile, open" });
+    const queryInput = h("input", { class: "prr-saved-input", type: "text", value: q, spellcheck: "false" });
+    const close = () => {
+      savedSearchEdit = null;
+      placeSavedSearches();
+    };
+    const save = (event) => {
+      event.preventDefault();
+      const search = { name: nameInput.value.trim(), q: normalizeQuery(queryInput.value) };
+      if (!search.name || !search.q) {
+        toast("Give the search a name and a query");
+        return;
+      }
+      savedSearchEdit = null;
+      storeSavedSearches(repo, index == null ? [...list, search] : list.map((item, i) => (i === index ? search : item)));
+    };
+    const remove = () => {
+      savedSearchEdit = null;
+      deleteSavedSearch(repo, list, index);
+    };
+    return h(
+      "form",
+      { class: "prr-saved-pop", onsubmit: save, onkeydown: (event) => event.key === "Escape" && close() },
+      h("label", {}, "Name", nameInput),
+      h("label", {}, "Query", queryInput),
+      h(
+        "div",
+        { class: "prr-row" },
+        index == null ? h("span") : h("button", { class: "prr-btn prr-danger", type: "button", onclick: remove }, "Delete"),
+        h("span", {}, h("button", { class: "prr-btn", type: "button", onclick: close }, "Cancel"), h("button", { class: "prr-btn prr-primary", type: "submit" }, "Save")),
+      ),
+    );
+  };
+
+  const SAVED_DRAG_TYPE = "text/x-prr-saved-search";
+
+  const placeSavedSearches = () => {
+    const m = location.pathname.match(REPO_PULLS_PAGE);
+    const input = document.getElementById("repo-pulls-dashboard-filter-input");
+    const host = input?.closest("[role='search']");
+    const existing = document.getElementById("prr-saved");
+    if (!config.features.savedSearches || !m || !host) {
+      existing?.remove();
+      return;
+    }
+    const repo = savedSearchRepo(m);
+    const list = loadSavedSearches(repo);
+    const current = normalizeQuery(new URLSearchParams(location.search).get("q") ?? input.value);
+    const active = list.findIndex((search) => search.q === current);
+    const fromQuery = savedFrom(repo);
+    const from = active < 0 && fromQuery ? list.findIndex((search) => search.q === fromQuery) : -1;
+    const edit = savedSearchEdit?.repo === repo ? savedSearchEdit : null;
+    const signature = JSON.stringify([list, current, from, edit]);
+    if (existing?.dataset.signature === signature && existing.previousElementSibling === host) return;
+
+    const hrefFor = (q) => `/${m[1]}/${m[2]}/pulls?q=${encodeURIComponent(q)}`;
+    const open = (event, search) => {
+      if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      setSavedFrom(repo, search.q);
+      goTo(hrefFor(search.q));
+    };
+    const startEdit = (fields) => {
+      savedSearchEdit = { repo, ...fields };
+      placeSavedSearches();
+    };
+    const move = (from, to) => {
+      if (from === to) return;
+      const next = list.filter((_, i) => i !== from);
+      next.splice(to, 0, list[from]);
+      storeSavedSearches(repo, next);
+    };
+    const chip = (search, index) =>
+      h(
+        "span",
+        {
+          class: `prr-saved-chip${index === active ? " prr-on" : ""}${index === from ? " prr-dirty" : ""}`,
+          draggable: "true",
+          title: `${search.q}\nDrag to reorder`,
+          ondragstart: (event) => {
+            event.dataTransfer.setData(SAVED_DRAG_TYPE, String(index));
+            event.dataTransfer.effectAllowed = "move";
+          },
+          ondragover: (event) => event.dataTransfer.types.includes(SAVED_DRAG_TYPE) && event.preventDefault(),
+          ondrop: (event) => {
+            event.preventDefault();
+            move(Number(event.dataTransfer.getData(SAVED_DRAG_TYPE)), index);
+          },
+        },
+        h("a", { href: hrefFor(search.q), draggable: "false", onclick: (event) => open(event, search) }, search.name),
+        index === from ? h("span", { class: "prr-saved-dot", title: "Filters changed since you opened this search" }, "●") : null,
+        h(
+          "span",
+          { class: "prr-saved-tools" },
+          h("button", { class: "prr-saved-tool", type: "button", title: "Edit", "aria-label": `Edit ${search.name}`, onclick: () => startEdit({ index, name: search.name, q: search.q }) }, "✎"),
+          h("button", { class: "prr-saved-tool", type: "button", title: "Delete", "aria-label": `Delete ${search.name}`, onclick: () => deleteSavedSearch(repo, list, index) }, "×"),
+        ),
+      );
+    // "Update" saves the applied query; a new search starts from the box, which may hold text not yet submitted.
+    const update = () => {
+      setSavedFrom(repo, current);
+      storeSavedSearches(repo, list.map((search, i) => (i === from ? { ...search, q: current } : search)));
+    };
+    const saveNew = () => startEdit({ index: null, name: "", q: normalizeQuery(input.value) });
+    const box = h(
+      "div",
+      { id: "prr-saved", "data-signature": signature },
+      ...list.map(chip),
+      from >= 0 ? h("button", { class: "prr-btn prr-saved-action", type: "button", title: current, onclick: update }, `↻ Update “${list[from].name}”`) : null,
+      active < 0 ? h("button", { class: "prr-btn prr-saved-action", type: "button", onclick: saveNew }, from >= 0 ? "☆ Save as new" : "☆ Save current") : null,
+      edit ? savedSearchEditor(repo, list) : null,
+    );
+    existing?.remove();
+    host.after(box);
+    if (edit) box.querySelector(".prr-saved-input")?.focus();
+  };
+
   const decorateElsewhere = () => {
     if (state.pr) {
       document.getElementById("prr-pending")?.remove();
       return;
     }
     placePendingList();
+    placeSavedSearches();
     decoratePrLinks();
     if (config.features.tickets && config.features.ticketsElsewhere) {
       decorateBranches();
@@ -3015,6 +3187,35 @@
     #prr-toast { position: fixed; left: 50%; bottom: 24px; z-index: 100; transform: translateX(-50%); padding: 6px 14px;
       font-size: 12px; border-radius: 8px; background: var(--bgColor-emphasis, #24292f); color: var(--fgColor-onEmphasis, #fff);
       box-shadow: 0 4px 12px rgba(31,35,40,.25); pointer-events: none; }
+    #prr-saved { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; line-height: 20px; }
+    .prr-saved-chip { display: inline-flex; align-items: center; padding: 0 10px; border-radius: 999px; cursor: grab;
+      border: 1px solid var(--borderColor-default, #d0d7de); transition: padding-right .12s; }
+    .prr-saved-chip:hover, .prr-saved-chip:focus-within { padding-right: 4px; }
+    .prr-saved-chip a { color: var(--fgColor-default, #1f2328); text-decoration: none; }
+    .prr-saved-chip a:hover { text-decoration: underline; }
+    .prr-saved-chip.prr-on, .prr-saved-chip.prr-dirty { border-color: var(--borderColor-accent-emphasis, #0969da); }
+    .prr-saved-chip.prr-on a, .prr-saved-chip.prr-dirty a { color: var(--fgColor-accent, #0969da); }
+    .prr-saved-chip.prr-dirty { border-style: dashed; }
+    .prr-saved-dot { margin-left: 4px; font-size: 10px; color: var(--fgColor-attention, #9a6700); }
+    .prr-saved-tools { display: inline-flex; max-width: 0; margin-left: 0; overflow: hidden; opacity: 0;
+      transition: max-width .12s, margin-left .12s, opacity .12s; }
+    .prr-saved-chip:hover .prr-saved-tools, .prr-saved-chip:focus-within .prr-saved-tools { max-width: 48px; margin-left: 4px; opacity: 1; }
+    .prr-saved-tool { padding: 0 3px; font: inherit; line-height: 18px; cursor: pointer; border: 0; border-radius: 999px;
+      background: transparent; color: var(--fgColor-muted, #656d76); }
+    .prr-saved-tool:hover { color: var(--fgColor-default, #1f2328); background: var(--control-bgColor-hover, #eaeef2); }
+    #prr-saved .prr-saved-action { margin: 0; border-radius: 999px; border-style: dashed; color: var(--fgColor-muted, #656d76); background: transparent; }
+    #prr-saved .prr-saved-action:hover { color: var(--fgColor-default, #1f2328); }
+    .prr-saved-pop { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; display: flex; flex-direction: column; gap: 8px;
+      width: min(420px, 100%); padding: 12px; border-radius: 8px; background: var(--overlay-bgColor, var(--bgColor-default, #fff));
+      border: 1px solid var(--borderColor-default, #d0d7de); box-shadow: var(--shadow-floating-large, 0 8px 24px rgba(140,149,159,.2)); }
+    .prr-saved-pop label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; font-weight: 600; color: var(--fgColor-muted, #656d76); }
+    .prr-saved-input { font: inherit; font-size: 13px; font-weight: 400; padding: 4px 8px; border-radius: 6px; color: var(--fgColor-default, #1f2328);
+      background: var(--bgColor-default, #fff); border: 1px solid var(--borderColor-default, #d0d7de); }
+    .prr-danger { color: var(--fgColor-danger, #cf222e); }
+    .prr-btn.prr-primary { color: var(--button-primary-fgColor-rest, #fff); background: var(--button-primary-bgColor-rest, #1f883d);
+      border-color: var(--button-primary-borderColor-rest, rgba(31,35,40,.15)); }
+    #prr-toast.prr-toast-action { display: flex; align-items: center; gap: 12px; pointer-events: auto; }
+    #prr-toast button { padding: 0; font: inherit; font-weight: 600; cursor: pointer; border: 0; background: none; color: inherit; text-decoration: underline; }
     #prr-modal { position: fixed; inset: 0; z-index: 110; display: flex; align-items: center; justify-content: center;
       background: rgba(31,35,40,.45); }
     .prr-modal-card { width: min(420px, calc(100vw - 32px)); max-height: 90vh; overflow: auto; font-size: 13px; line-height: 1.5; outline: none;
@@ -3178,6 +3379,8 @@
     requestAnimationFrame(() => {
       filterItemQueued = false;
       injectFilterItem();
+      // Not left to the debounced scan: React drops the row when it re-renders, and putting it back before the next paint avoids a visible jump.
+      if (!state.pr) placeSavedSearches();
     });
   };
 
