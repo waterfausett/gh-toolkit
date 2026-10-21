@@ -11,8 +11,8 @@ const source = readFileSync(new URL("gh-pr-review-toolkit.user.js", root), "utf8
 const start = source.indexOf("// #region coverage-core");
 const end = source.indexOf("// #endregion coverage-core");
 if (start < 0 || end < 0) throw new Error("coverage-core region markers not found in gh-pr-review-toolkit.user.js");
-const { unzipText, isCobertura, parseCobertura, addReport, matchCoverage, fileCoverage, formatPct, coverageTone } = new Function(
-  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, addReport, matchCoverage, fileCoverage, formatPct, coverageTone };`,
+const { unzipText, isCobertura, parseCobertura, addReport, matchCoverage, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows } = new Function(
+  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, addReport, matchCoverage, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows };`,
 )();
 
 const coverageXml = () => readFileSync(fixture("pkg-coverage.xml"), "utf8");
@@ -84,4 +84,38 @@ test("coverageTone", () => {
   assert.equal(coverageTone(79.9, 80, 10), "warn");
   assert.equal(coverageTone(70, 80, 10), "warn");
   assert.equal(coverageTone(69.9, 80, 10), "bad");
+});
+
+const statusDetails = () => JSON.parse(readFileSync(fixture("status-details.json"), "utf8"));
+
+test("parseStatusDetails keeps only Actions jobs", () => {
+  // The codecov "failure" is not an Actions job, so it doesn't count as failed.
+  assert.deepEqual(parseStatusDetails(statusDetails()), {
+    pending: false,
+    failed: false,
+    runIds: ["39653514710"],
+    jobIds: ["119408658405", "119408658536", "119408658646"],
+  });
+});
+
+test("parseStatusDetails: pending and failed", () => {
+  const d = statusDetails();
+  const jobs = d.checkRuns.filter((r) => r.targetUrl.includes("/actions/runs/"));
+  jobs[0].pending = true;
+  jobs[0].state = "pending";
+  jobs[1].state = "failure";
+  assert.deepEqual([parseStatusDetails(d).pending, parseStatusDetails(d).failed], [true, true]);
+  jobs[1].state = "skipped";
+  assert.equal(parseStatusDetails(d).failed, false);
+});
+
+test("parseStatusDetails tolerates garbage", () => {
+  assert.deepEqual(parseStatusDetails(null), { pending: false, failed: false, runIds: [], jobIds: [] });
+});
+
+test("parseArtifactRows reads id, name and size", () => {
+  const rows = parseArtifactRows(readFileSync(fixture("run-artifacts.html"), "utf8"));
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.find((r) => r.id === "12370044095"), { id: "12370044095", name: "Packages", sizeMB: 2.1 });
+  assert.deepEqual(parseArtifactRows("<html></html>"), []);
 });

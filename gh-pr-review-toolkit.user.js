@@ -404,6 +404,38 @@
   const formatPct = (covered, measured) => `${Math.floor((100 * covered) / measured)}%`;
 
   const coverageTone = (pct, threshold, margin) => (pct >= threshold ? "ok" : pct >= threshold - margin ? "warn" : "bad");
+
+  const ACTIONS_JOB = /\/actions\/runs\/(\d+)\/job\/(\d+)/;
+  const PASSING_STATES = new Set(["success", "skipped", "neutral"]);
+
+  // status-details lists every check on one commit; only Actions jobs can carry artifacts.
+  const parseStatusDetails = (json) => {
+    const jobs = (Array.isArray(json?.checkRuns) ? json.checkRuns : [])
+      .map((run) => ({ run, m: String(run?.targetUrl ?? "").match(ACTIONS_JOB) }))
+      .filter(({ m }) => m);
+    return {
+      pending: jobs.some(({ run }) => run.pending === true),
+      failed: jobs.some(({ run }) => run.pending !== true && !PASSING_STATES.has(run.state)),
+      runIds: [...new Set(jobs.map(({ m }) => m[1]))],
+      jobIds: jobs.map(({ m }) => m[2]).sort(),
+    };
+  };
+
+  const SIZE_UNITS_MB = { byte: 1 / 1048576, bytes: 1 / 1048576, kb: 1 / 1024, mb: 1, gb: 1024 };
+
+  const parseArtifactRows = (html) =>
+    html
+      .split('data-artifact-id="')
+      .slice(1)
+      .flatMap((chunk) => {
+        const id = chunk.match(/^\d+/)?.[0];
+        if (!id) return [];
+        const rowEnd = chunk.indexOf("</tr>");
+        const row = rowEnd < 0 ? chunk : chunk.slice(0, rowEnd);
+        const name = row.match(/class="[^"]*\btext-bold\b[^"]*"[^>]*>\s*([^<]*?)\s*</)?.[1] ?? "";
+        const size = row.match(/<td[^>]*>\s*([\d.]+)\s*(Bytes?|KB|MB|GB)\s*</i);
+        return [{ id, name: decodeXml(name), sizeMB: size ? Number(size[1]) * SIZE_UNITS_MB[size[2].toLowerCase()] : null }];
+      });
   // #endregion coverage-core
 
   const NPM_SECTION = /^(dependencies|devDependencies|peerDependencies|optionalDependencies)$/;
