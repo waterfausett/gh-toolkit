@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.16.0
+// @version      0.16.1
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -2936,6 +2936,8 @@
   };
 
   // Per lowercased owner/repo, PR numbers only, newest first. A list's chip is a query of #refs, which the Pull requests page ORs together.
+  // GitHub also unions in a full-text match on all the terms, so a lone #7 pulls in #17 and #77; a term no PR contains empties that half.
+  const EXACT_REFS = "#pr_number_exact_match";
   const PR_LISTS = {
     starred: { feature: "starredPrs", cap: 50, refuseWhenFull: true, icon: ["☆", "★"], label: ["Star", "Starred"] },
     later: { feature: "laterPrs", cap: 50, refuseWhenFull: true, icon: ["🔖", "🔖"], label: ["Save for later", "Saved for later"] },
@@ -3034,10 +3036,10 @@
       config.features.starredPrs && { icon: "★", name: "Starred", numbers: loadPrList(key, "starred"), only: "" },
       config.features.laterPrs && { icon: "🔖", name: "Later", numbers: loadPrList(key, "later"), only: " is:open" },
       config.features.recentPrs && { icon: "🕘", name: "Recent", numbers: loadPrList(key, "recent"), only: " is:open" },
-      { icon: "✎", name: "Pending", numbers: pending, only: "" },
+      { icon: "✎", name: "Pending", numbers: pending, only: " is:open" },
     ]
       .filter((list) => list && list.numbers.length)
-      .map(({ icon, name, numbers, only }) => ({ icon, name, count: numbers.length, q: `is:pr${only} ${numbers.map((n) => `#${n}`).join(" ")}` }));
+      .map(({ icon, name, numbers, only }) => ({ icon, name, count: numbers.length, q: `is:pr${only} ${numbers.map((n) => `#${n}`).join(" ")} ${EXACT_REFS}` }));
   };
 
   const REPO_PULLS_PAGE = /^\/([^/]+)\/([^/]+)\/pulls(\/|$)/;

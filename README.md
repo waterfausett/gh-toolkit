@@ -308,9 +308,9 @@ A PR's header gets **☆ Star** and **🔖 Save for later** next to its state la
 - **★ Starred**: kept until you unstar it, merged or closed included (`is:pr #a #b …`). Up to 50 per repo; past that you're asked to unstar one first.
 - **🔖 Later**: for "I'll review this when I have time". It's dropped once the PR is seen merged or closed, on its own page or as a list row, and the chip's `is:open` hides it before then. Up to 50 per repo. Merged and closed PRs don't offer it.
 - **🕘 Recent**: the last 50 PRs you opened in the repo, open ones only (`is:pr is:open #a #b …`). GitHub sorts the results, not by when you viewed them.
-- **✎ Pending**: PRs with an unsubmitted review, from the same record as the list badges (needs "Review badges in PR lists").
+- **✎ Pending**: open (including draft) PRs with an unsubmitted review, from the same record as the list badges (needs "Review badges in PR lists").
 
-Each chip is an ordinary query: GitHub's Pull requests search ORs the `#n` refs, so you can open one and add filters. A chip is hidden while its list is empty, and the count is what's stored, not what GitHub shows. Each list has its own toggle under **PR lists** in the settings. Only the lowercased `owner/repo` and PR numbers are stored, under `prLists`, never titles.
+Each chip is an ordinary query: GitHub's Pull requests search ORs the `#n` refs, so you can open one and add filters. Every chip query ends in `#pr_number_exact_match`: GitHub also adds a full-text match on all the terms, so a lone `#7` would pull in #17 and #77, and a term no PR contains empties that half and leaves only the listed numbers. A chip is hidden while its list is empty, and the count is what's stored, not what GitHub shows. Each list has its own toggle under **PR lists** in the settings. Only the lowercased `owner/repo` and PR numbers are stored, under `prLists`, never titles.
 </details>
 
 ## 📡 How data is loaded
