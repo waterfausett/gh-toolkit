@@ -88,7 +88,7 @@ Click any feature for the details.
 <summary><b>My PRs</b> — jump to the pull requests you authored</summary>
 <br>
 
-**My PRs** in the panel bar, or <kbd>Alt</kbd>+<kbd>M</kbd> on any GitHub page (not just PRs). Opens `/<org>/<repo>/pulls/<your login>` for the repo you are in, with the repo and login read from the page. Outside a repo it opens GitHub's global `/pulls` instead. Ctrl/middle-click the panel link to open it in a new tab. Leaving a PR this way still goes through the unsubmitted-review warning.
+<kbd>Alt</kbd>+<kbd>M</kbd> on any GitHub page (not just PRs). Opens `/<org>/<repo>/pulls/<your login>` for the repo you are in, with the repo and login read from the page. Outside a repo it opens GitHub's global `/pulls` instead. Leaving a PR this way still goes through the unsubmitted-review warning.
 </details>
 
 <details>
