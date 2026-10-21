@@ -54,7 +54,8 @@ A new feature in `gh-pr-review-toolkit.user.js`, with key `coverage` in `DEFAULT
 ### Configuration (in `DEFAULTS`, editable via the settings modal / config JSON)
 
 - `coverageArtifactPattern`: a regex string matched case-insensitively against artifact names. Default `"cov"`. *(My call.)*
-- `coverageThreshold`: a percentage, default `80`. At 100% the badge is green ("ok"); from the threshold up to 100% it's amber ("warn"); below the threshold it's red. *(The user asked for this to be a setting. 80 as the default is my call.)*
+- `coverageThreshold`: a percentage, default `80`. At or above the threshold, the badge is green ("ok").
+- `coverageWarnMargin`: percentage points, default `10`. Below the threshold but within the margin (default 70% up to 80%), it's amber ("warn"). Below that, it's red. *(The user decided: green ≥ threshold, amber just below it, red below that, with an 80 default. The margin being a setting, and its default of 10, are my call.)*
 
 ### Data flow
 
