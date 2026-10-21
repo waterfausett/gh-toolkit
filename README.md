@@ -278,7 +278,7 @@ On PR lists (a repo's Pulls, the global `/pulls`, issue and search results), PRs
 
 If "New commits since your last look" is on and you have a last look for the PR, a **3 new commits** badge (or **force-pushed**) links to the same range view as the panel. PRs you never marked a file Viewed on show nothing and cost no requests.
 
-A PR where your pending review has comments gets **✎ 3 unsubmitted**, linking to its Files tab. A **✎ N unsubmitted reviews** button at the bottom right of list pages opens every one of them, across repos and pages, newest first. These are saved per visit too: a review you submit from somewhere else stays listed until you next open that PR. Unlike the rest of the stored data, these entries are kept under the plain `owner/repo#n` (and title) so the list can name them; an entry is removed when you open the PR and it has no pending comments.
+A PR where your pending review has comments gets **✎ 3 unsubmitted**, linking to its Files tab. A **✎ N unsubmitted reviews** button at the bottom right of list pages opens every one of them, across repos and pages, newest first. These are saved per visit too: a review you submit from somewhere else stays listed until you next open that PR. Unlike the rest of the stored data, these entries are kept under the plain `owner/repo#n` (never the title) so the list can name them; an entry is removed when you open the PR and it has no pending comments.
 </details>
 
 <details>
@@ -297,6 +297,20 @@ A row of chips under the search box on `/<owner>/<repo>/pulls`. Build a query wi
 If you open a chip and then change the filters, it gets a **●** and you're offered **↻ Update "name"** (save the new query over it) or **☆ Save as new**.
 
 Each repo has its own list, stored in Tampermonkey storage under the lowercased `owner/repo`, so it stays in that browser and isn't synced between machines.
+</details>
+
+<details>
+<summary><b>Starred, saved for later, recent and pending</b> — built-in chips for finding PRs in a busy repo</summary>
+<br>
+
+A PR's header gets **☆ Star** and **🔖 Save for later** next to its state label, and PR rows in lists get the same two icons on hover (lit when set), so you can mark a PR without opening it. They fill four built-in chips at the front of the saved-searches row, ahead of your own searches:
+
+- **★ Starred**: kept until you unstar it, merged or closed included (`is:pr #a #b …`). Up to 50 per repo; past that you're asked to unstar one first.
+- **🔖 Later**: for "I'll review this when I have time". It's dropped once the PR is seen merged or closed, on its own page or as a list row, and the chip's `is:open` hides it before then. Up to 50 per repo. Merged and closed PRs don't offer it.
+- **🕘 Recent**: the last 50 PRs you opened in the repo, open ones only (`is:pr is:open #a #b …`). GitHub sorts the results, not by when you viewed them.
+- **✎ Pending**: PRs with an unsubmitted review, from the same record as the list badges (needs "Review badges in PR lists").
+
+Each chip is an ordinary query: GitHub's Pull requests search ORs the `#n` refs, so you can open one and add filters. A chip is hidden while its list is empty, and the count is what's stored, not what GitHub shows. Each list has its own toggle under **PR lists** in the settings. Only the lowercased `owner/repo` and PR numbers are stored, under `prLists`, never titles.
 </details>
 
 ## 📡 How data is loaded
@@ -402,4 +416,6 @@ List badges and ticket chips off a PR attach after PR title links (`a[data-hover
 <br>
 
 The chip row (`placeSavedSearches`) is inserted right after the `[role="search"]` wrapper around `#repo-pulls-dashboard-filter-input`, and each scan puts it back if React dropped it. If GitHub renames that input, the row just doesn't appear. The applied query is read from the URL's `q`, falling back to the input's value when there is none. The chip you last opened is kept in `sessionStorage` per repo, which is how a tweaked search knows which chip to offer to update.
+
+The built-in list chips share that row (`listChips`) and render even with saved searches off. Opening one clears the remembered saved search. The PR header buttons (`placePrMarks`) go right after the first `[data-component="StateLabel"]` (classic: `.gh-header-meta .State`), whose `data-status` (`pullMerged`, `pullClosed`) or `State--merged` / `State--closed` class tells a finished PR. List rows count as merged or closed when their `li` / `.js-issue-row` holds an `octicon-git-merge` or `octicon-git-pull-request-closed` icon. Row icons ride in the same `span.prr-meta` as the list badges, which also attach to the React list's `a[data-testid="listitem-title-link"]`.
 </details>

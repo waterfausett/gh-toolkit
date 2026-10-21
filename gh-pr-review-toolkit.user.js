@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.15.0
+// @version      0.16.0
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -55,6 +55,10 @@
       listBadges: true,
       ticketsElsewhere: true,
       savedSearches: true,
+      starredPrs: true,
+      laterPrs: true,
+      recentPrs: true,
+      pendingChip: true,
     },
     snippets: {
       nit: "nit: ",
@@ -155,6 +159,15 @@
         { key: "savedSearches", label: "Saved searches on PR lists", note: "Chips under the search box on a repo's Pull requests page" },
       ],
     },
+    {
+      title: "PR lists",
+      features: [
+        { key: "starredPrs", label: "Starred PRs", note: "☆ on a PR or a list row; up to 50 per repo, kept until you unstar" },
+        { key: "laterPrs", label: "Saved for later", note: "🔖 on a PR or a list row; dropped once merged or closed" },
+        { key: "recentPrs", label: "Recently viewed PRs", note: "The last 50 you opened in each repo" },
+        { key: "pendingChip", label: "Pending reviews chip", note: "Needs \"Review badges in PR lists\", which records them" },
+      ],
+    },
   ];
 
   const store = {
@@ -217,6 +230,13 @@
     store.set("lastPrunedAt", now);
   };
 
+  // Pending reviews used to keep the PR title too.
+  const dropPendingTitles = () => {
+    const pending = store.get("pendingReviews", {});
+    if (!Object.values(pending).some((entry) => "title" in entry)) return;
+    store.set("pendingReviews", Object.fromEntries(Object.entries(pending).map(([key, { count, at }]) => [key, { count, at }])));
+  };
+
   const migrateLegacyKeys = () => {
     const LEGACY_VIEWED = "viewed:v2:";
     const LEGACY_FILTER = "changedFilter:";
@@ -240,6 +260,7 @@
   };
   migrateLegacyKeys();
   pruneStalePrs();
+  dropPendingTitles();
 
   const loadConfig = () => {
     const saved = store.get("config", {});
@@ -2685,7 +2706,7 @@
     return pendingReview.count;
   };
 
-  // Stored under the plain PR key (unlike the hashed per-PR keys) so lists can name PRs that aren't on the current page; an entry only lives while a review is pending.
+  // Stored under the plain PR key (unlike the hashed per-PR keys) so lists can name PRs that aren't on the current page; an entry only lives while a review is pending. No titles, so storage holds nothing the URL doesn't.
   const savePendingReview = () => {
     if (!config.features.listBadges || !state.pr) return;
     const count = currentPendingCount();
@@ -2696,8 +2717,7 @@
       delete pending[state.pr.key];
     } else {
       if (entry?.count === count && Date.now() - entry.at < DAY_MS) return;
-      const title = document.title.split(" · ")[0].replace(/ by [\w-]+$/, "").trim();
-      pending[state.pr.key] = { count, title: title || entry?.title || "", at: Date.now() };
+      pending[state.pr.key] = { count, at: Date.now() };
     }
     store.set("pendingReviews", pending);
   };
@@ -2821,14 +2841,25 @@
   const elsewhereTickets = (sources) =>
     config.features.tickets && config.features.ticketsElsewhere ? ticketMatches(sources).map(ticketChip) : [];
 
+  const PR_TITLE_LINKS = "a[data-hovercard-type='pull_request'], a.js-navigation-open[href*='/pull/'], a[data-testid='listitem-title-link'][href*='/pull/']";
+  const PR_ROW = "li, .js-issue-row";
+  const PR_DONE_ICON = ".octicon-git-merge, .octicon-git-pull-request-closed";
+
   const decoratePrLinks = () => {
-    if (!LIST_PAGE.test(location.pathname) || !(config.features.listBadges || config.features.ticketsElsewhere)) return;
-    for (const anchor of document.querySelectorAll("a[data-hovercard-type='pull_request'], a.js-navigation-open[href*='/pull/']")) {
+    const marks = markedLists();
+    if (!LIST_PAGE.test(location.pathname) || !(config.features.listBadges || config.features.ticketsElsewhere || marks.length)) return;
+    for (const anchor of document.querySelectorAll(PR_TITLE_LINKS)) {
       const m = anchor.getAttribute("href")?.match(PR_HREF);
       if (!m || !anchor.textContent.trim() || anchor.closest(".comment-body, .markdown-body, .prr-meta")) continue;
       const [, owner, repo, number] = m;
       const pr = { owner, repo, number: Number(number), key: `${owner}/${repo}#${number}` };
-      placeMeta(anchor, [...(config.features.listBadges ? listBadges(pr) : []), ...elsewhereTickets([{ text: anchor.textContent }])]);
+      const done = Boolean(anchor.closest(PR_ROW)?.querySelector(PR_DONE_ICON));
+      if (done) notePrDone(pr);
+      placeMeta(anchor, [
+        ...marks.filter((name) => !(done && name === "later")).map((name) => markButton(pr, name, "prr-mark", false)),
+        ...(config.features.listBadges ? listBadges(pr) : []),
+        ...elsewhereTickets([{ text: anchor.textContent }]),
+      ]);
     }
   };
 
@@ -2887,13 +2918,13 @@
         ? h(
             "div",
             { class: "prr-pending-list" },
-            ...entries.map(([key, { count, title }]) => {
+            ...entries.map(([key, { count }]) => {
               const [, owner, repo, number] = key.match(/^([^/]+)\/([^#]+)#(\d+)$/);
               return h(
                 "a",
-                { class: "prr-pending-row", href: `/${owner}/${repo}/pull/${number}/files`, title: `${count} pending comment${count === 1 ? "" : "s"}` },
-                h("span", { class: "prr-block" }, title || key),
-                h("span", { class: "prr-muted" }, `${key} · ${count}`),
+                { class: "prr-pending-row", href: `/${owner}/${repo}/pull/${number}/files` },
+                h("span", { class: "prr-block" }, key),
+                h("span", { class: "prr-muted" }, `${count} pending comment${count === 1 ? "" : "s"}`),
               );
             }),
             h("div", { class: "prr-muted prr-pending-note" }, "As of your last visit to each PR. Submitted elsewhere? Open the PR once to clear it."),
@@ -2902,6 +2933,111 @@
     );
     if (existing) existing.replaceWith(box);
     else document.body.append(box);
+  };
+
+  // Per lowercased owner/repo, PR numbers only, newest first. A list's chip is a query of #refs, which the Pull requests page ORs together.
+  const PR_LISTS = {
+    starred: { feature: "starredPrs", cap: 50, refuseWhenFull: true, icon: ["☆", "★"], label: ["Star", "Starred"] },
+    later: { feature: "laterPrs", cap: 50, refuseWhenFull: true, icon: ["🔖", "🔖"], label: ["Save for later", "Saved for later"] },
+    recent: { feature: "recentPrs", cap: 50 },
+  };
+  const MARKED_LISTS = ["starred", "later"];
+
+  const prRepo = (owner, repo) => `${owner}/${repo}`.toLowerCase();
+  const loadPrList = (repo, name) => store.get("prLists", {})[repo]?.[name] ?? [];
+  const storePrList = (repo, name, numbers) => {
+    const all = store.get("prLists", {});
+    const lists = { ...all[repo], [name]: numbers };
+    if (!numbers.length) delete lists[name];
+    if (Object.keys(lists).length) all[repo] = lists;
+    else delete all[repo];
+    store.set("prLists", all);
+  };
+  const markedLists = () => MARKED_LISTS.filter((name) => config.features[PR_LISTS[name].feature]);
+
+  const togglePrMark = (pr, name) => {
+    const repo = prRepo(pr.owner, pr.repo);
+    const list = loadPrList(repo, name);
+    const { cap, label } = PR_LISTS[name];
+    if (list.includes(pr.number)) {
+      storePrList(repo, name, list.filter((n) => n !== pr.number));
+    } else if (list.length >= cap) {
+      toast(`This repo already has ${cap} ${label[1].toLowerCase()} PRs; remove one first`, 4000);
+      return;
+    } else {
+      storePrList(repo, name, [pr.number, ...list]);
+    }
+    if (state.pr) placePrMarks();
+    else decorateElsewhere();
+  };
+
+  const noteRecentPr = (pr) => {
+    if (!config.features.recentPrs) return;
+    const repo = prRepo(pr.owner, pr.repo);
+    const list = loadPrList(repo, "recent");
+    if (list[0] === pr.number) return;
+    storePrList(repo, "recent", [pr.number, ...list.filter((n) => n !== pr.number)].slice(0, PR_LISTS.recent.cap));
+  };
+
+  // Saved for later ends at merge or close, noticed wherever the PR's state shows: its own page or a list row. Until then the chip's is:open hides it.
+  const notePrDone = (pr) => {
+    const repo = prRepo(pr.owner, pr.repo);
+    const list = loadPrList(repo, "later");
+    if (list.includes(pr.number)) storePrList(repo, "later", list.filter((n) => n !== pr.number));
+  };
+
+  const markButton = (pr, name, cls, withLabel) => {
+    const { icon, label } = PR_LISTS[name];
+    const on = loadPrList(prRepo(pr.owner, pr.repo), name).includes(pr.number);
+    const text = on ? label[1] : label[0];
+    const toggle = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      togglePrMark(pr, name);
+    };
+    return h(
+      "button",
+      { class: `${cls}${on ? " prr-on" : ""}`, type: "button", title: on ? `${text}; click to remove` : text, "aria-label": text, "aria-pressed": String(on), onclick: toggle },
+      withLabel ? `${icon[on ? 1 : 0]} ${text}` : icon[on ? 1 : 0],
+    );
+  };
+
+  // React header: StateLabel's data-status is draft, pullOpened, pullMerged or pullClosed. Classic header: .State--merged / .State--closed.
+  const PR_STATE_LABEL = "[data-component='StateLabel'][data-status], .gh-header-meta .State";
+  const prIsDone = (label) => /merged|closed/i.test(label.dataset.status ?? label.className);
+
+  const placePrMarks = () => {
+    const label = document.querySelector(PR_STATE_LABEL);
+    const existing = document.getElementById("prr-marks");
+    const done = Boolean(label) && prIsDone(label);
+    if (done) notePrDone(state.pr);
+    const names = markedLists().filter((name) => !(done && name === "later"));
+    if (!label || !names.length) {
+      existing?.remove();
+      return;
+    }
+    const box = h("span", { id: "prr-marks" }, ...names.map((name) => markButton(state.pr, name, "prr-btn prr-mark-btn", true)));
+    if (existing?.innerHTML === box.innerHTML && existing.previousElementSibling === label) return;
+    existing?.remove();
+    label.after(box);
+  };
+
+  const listChips = (owner, repo) => {
+    const key = prRepo(owner, repo);
+    const pending = config.features.pendingChip && config.features.listBadges
+      ? Object.keys(store.get("pendingReviews", {}))
+          .map((prKey) => prKey.match(/^([^#]+)#(\d+)$/))
+          .filter((m) => m && m[1].toLowerCase() === key)
+          .map((m) => Number(m[2]))
+      : [];
+    return [
+      config.features.starredPrs && { icon: "★", name: "Starred", numbers: loadPrList(key, "starred"), only: "" },
+      config.features.laterPrs && { icon: "🔖", name: "Later", numbers: loadPrList(key, "later"), only: " is:open" },
+      config.features.recentPrs && { icon: "🕘", name: "Recent", numbers: loadPrList(key, "recent"), only: " is:open" },
+      { icon: "✎", name: "Pending", numbers: pending, only: "" },
+    ]
+      .filter((list) => list && list.numbers.length)
+      .map(({ icon, name, numbers, only }) => ({ icon, name, count: numbers.length, q: `is:pr${only} ${numbers.map((n) => `#${n}`).join(" ")}` }));
   };
 
   const REPO_PULLS_PAGE = /^\/([^/]+)\/([^/]+)\/pulls(\/|$)/;
@@ -2992,27 +3128,37 @@
     const input = document.getElementById("repo-pulls-dashboard-filter-input");
     const host = input?.closest("[role='search']");
     const existing = document.getElementById("prr-saved");
-    if (!config.features.savedSearches || !m || !host) {
+    const saving = config.features.savedSearches;
+    const chips = m ? listChips(m[1], m[2]) : [];
+    if (!m || !host || !(saving || chips.length)) {
       existing?.remove();
       return;
     }
     const repo = savedSearchRepo(m);
-    const list = loadSavedSearches(repo);
+    const list = saving ? loadSavedSearches(repo) : [];
     const current = normalizeQuery(new URLSearchParams(location.search).get("q") ?? input.value);
     const active = list.findIndex((search) => search.q === current);
+    const builtInActive = chips.some((c) => c.q === current);
     const fromQuery = savedFrom(repo);
     const from = active < 0 && fromQuery ? list.findIndex((search) => search.q === fromQuery) : -1;
     const edit = savedSearchEdit?.repo === repo ? savedSearchEdit : null;
-    const signature = JSON.stringify([list, current, from, edit]);
+    const signature = JSON.stringify([list, chips, saving, current, from, edit]);
     if (existing?.dataset.signature === signature && existing.previousElementSibling === host) return;
 
     const hrefFor = (q) => `/${m[1]}/${m[2]}/pulls?q=${encodeURIComponent(q)}`;
-    const open = (event, search) => {
+    // A built-in chip clears the remembered saved search, so tweaking its query doesn't offer to update one.
+    const open = (event, q, savedQ = q) => {
       if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
-      setSavedFrom(repo, search.q);
-      goTo(hrefFor(search.q));
+      setSavedFrom(repo, savedQ);
+      goTo(hrefFor(q));
     };
+    const listChip = (c) =>
+      h(
+        "span",
+        { class: `prr-saved-chip prr-list-chip${c.q === current ? " prr-on" : ""}`, title: c.q },
+        h("a", { href: hrefFor(c.q), onclick: (event) => open(event, c.q, "") }, `${c.icon} ${c.name}`, h("span", { class: "prr-list-count" }, String(c.count))),
+      );
     const startEdit = (fields) => {
       savedSearchEdit = { repo, ...fields };
       placeSavedSearches();
@@ -3040,7 +3186,7 @@
             move(Number(event.dataTransfer.getData(SAVED_DRAG_TYPE)), index);
           },
         },
-        h("a", { href: hrefFor(search.q), draggable: "false", onclick: (event) => open(event, search) }, search.name),
+        h("a", { href: hrefFor(search.q), draggable: "false", onclick: (event) => open(event, search.q) }, search.name),
         index === from ? h("span", { class: "prr-saved-dot", title: "Filters changed since you opened this search" }, "●") : null,
         h(
           "span",
@@ -3058,9 +3204,13 @@
     const box = h(
       "div",
       { id: "prr-saved", "data-signature": signature },
+      ...chips.map(listChip),
+      chips.length && saving ? h("span", { class: "prr-saved-sep" }) : null,
       ...list.map(chip),
       from >= 0 ? h("button", { class: "prr-btn prr-saved-action", type: "button", title: current, onclick: update }, `↻ Update “${list[from].name}”`) : null,
-      active < 0 ? h("button", { class: "prr-btn prr-saved-action", type: "button", onclick: saveNew }, from >= 0 ? "☆ Save as new" : "☆ Save current") : null,
+      saving && active < 0 && !builtInActive
+        ? h("button", { class: "prr-btn prr-saved-action", type: "button", onclick: saveNew }, from >= 0 ? "☆ Save as new" : "☆ Save current")
+        : null,
       edit ? savedSearchEditor(repo, list) : null,
     );
     existing?.remove();
@@ -3094,6 +3244,7 @@
       resetState(pr);
       loadData(pr);
       touchPr(digest(pr.key));
+      noteRecentPr(pr);
     }
     redirectWithWhitespaceHidden();
     resolveDomPaths();
@@ -3101,6 +3252,7 @@
     processNoise();
     applyChangedFilter();
     renderPanel();
+    placePrMarks();
     pendingReviewCount();
     savePendingReview();
   };
@@ -3203,6 +3355,18 @@
     .prr-saved-tool { padding: 0 3px; font: inherit; line-height: 18px; cursor: pointer; border: 0; border-radius: 999px;
       background: transparent; color: var(--fgColor-muted, #656d76); }
     .prr-saved-tool:hover { color: var(--fgColor-default, #1f2328); background: var(--control-bgColor-hover, #eaeef2); }
+    .prr-list-chip { cursor: default; background: var(--bgColor-muted, #f6f8fa); }
+    .prr-list-chip:hover, .prr-list-chip:focus-within { padding-right: 10px; }
+    .prr-list-count { margin-left: 5px; color: var(--fgColor-muted, #656d76); font-variant-numeric: tabular-nums; }
+    .prr-saved-sep { width: 1px; height: 16px; margin: 0 2px; background: var(--borderColor-default, #d0d7de); }
+    #prr-marks { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; }
+    #prr-marks .prr-mark-btn { margin: 0; line-height: 22px; }
+    .prr-mark-btn.prr-on { border-color: var(--borderColor-accent-emphasis, #0969da); color: var(--fgColor-accent, #0969da); }
+    .prr-mark { padding: 0 2px; font: inherit; font-size: 13px; line-height: 16px; cursor: pointer; border: 0; border-radius: 4px; background: transparent;
+      color: var(--fgColor-muted, #656d76); opacity: 0; filter: grayscale(1); transition: opacity .12s; }
+    .prr-mark.prr-on { opacity: 1; filter: none; color: var(--fgColor-attention, #9a6700); }
+    li:hover .prr-mark, .js-issue-row:hover .prr-mark, .prr-mark:focus-visible { opacity: 1; }
+    .prr-mark:hover { background: var(--control-bgColor-hover, #eaeef2); }
     #prr-saved .prr-saved-action { margin: 0; border-radius: 999px; border-style: dashed; color: var(--fgColor-muted, #656d76); background: transparent; }
     #prr-saved .prr-saved-action:hover { color: var(--fgColor-default, #1f2328); }
     .prr-saved-pop { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; display: flex; flex-direction: column; gap: 8px;
