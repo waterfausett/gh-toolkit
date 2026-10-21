@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.14.0
+// @version      0.14.1
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -1087,8 +1087,21 @@
     return bottom;
   };
 
-  const scrollToFile = (el, behavior = "auto") =>
-    scrollTo({ top: scrollY + el.getBoundingClientRect().top - stickyTop() - STICKY_GAP_PX, behavior });
+  const fileOffset = (el) => el.getBoundingClientRect().top - stickyTop() - STICKY_GAP_PX;
+
+  // A smooth scroll aims at a position fixed when it starts, but lazy-rendered files above and GitHub's collapsing header shift the layout
+  // on the way, so it is corrected once it ends. The timeout drops the listener when the scroll never starts or the user takes over.
+  const scrollToFile = (el, behavior = "auto") => {
+    scrollTo({ top: scrollY + fileOffset(el), behavior });
+    if (behavior !== "smooth") return;
+    const settle = () => {
+      clearTimeout(timer);
+      const offset = el.isConnected ? fileOffset(el) : 0;
+      if (Math.abs(offset) > 1 && Math.abs(offset) < innerHeight / 2) scrollTo({ top: scrollY + offset, behavior: "auto" });
+    };
+    const timer = setTimeout(() => removeEventListener("scrollend", settle), 2000);
+    addEventListener("scrollend", settle, { once: true });
+  };
 
   const landOnFile = (el) => {
     const { path } = fileTarget();
@@ -2356,9 +2369,11 @@
     }, 1500);
   };
 
+  // Outside a repo there is no per-repo list, so GitHub's global /pulls (which defaults to "Created") is the fallback.
   const myPrsHref = () => {
     const login = document.querySelector("meta[name='user-login']")?.content;
-    return login ? `/pulls/${encodeURIComponent(login)}` : "/pulls";
+    const nwo = state.pr ? `${state.pr.owner}/${state.pr.repo}` : document.querySelector("meta[name='octolytics-dimension-repository_nwo']")?.content;
+    return login && nwo ? `/${nwo}/pulls/${encodeURIComponent(login)}` : "/pulls";
   };
 
   const ticketChip = ([id, url]) =>

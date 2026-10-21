@@ -55,7 +55,7 @@ Every feature has a toggle in the settings modal, opened with the ⚙ in the pan
 | <kbd>Alt</kbd>+<kbd>1</kbd> … <kbd>4</kbd> | Conversation / Commits / Checks / Files |
 | <kbd>Alt</kbd>+<kbd>R</kbd> | Open GitHub's review dialog |
 | <kbd>Alt</kbd>+<kbd>P</kbd> | Quick file jump |
-| <kbd>Alt</kbd>+<kbd>M</kbd> | Your pull requests (works on any GitHub page) |
+| <kbd>Alt</kbd>+<kbd>M</kbd> | Your pull requests in the current repo |
 | <kbd>Alt</kbd>+<kbd>N</kbd> / <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> | Next / previous unviewed file |
 | <kbd>Alt</kbd>+<kbd>J</kbd> / <kbd>Alt</kbd>+<kbd>K</kbd> | Next / previous unresolved thread |
 | <kbd>Alt</kbd>+<kbd>L</kbd> / <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> | Next / previous debug leftover |
@@ -88,7 +88,7 @@ Click any feature for the details.
 <summary><b>My PRs</b> — jump to the pull requests you authored</summary>
 <br>
 
-**My PRs** in the panel bar, or <kbd>Alt</kbd>+<kbd>M</kbd> on any GitHub page (not just PRs). Opens `/pulls/<your login>`, with the login read from the page. Ctrl/middle-click the panel link to open it in a new tab. Leaving a PR this way still goes through the unsubmitted-review warning.
+**My PRs** in the panel bar, or <kbd>Alt</kbd>+<kbd>M</kbd> on any GitHub page (not just PRs). Opens `/<org>/<repo>/pulls/<your login>` for the repo you are in, with the repo and login read from the page. Outside a repo it opens GitHub's global `/pulls` instead. Ctrl/middle-click the panel link to open it in a new tab. Leaving a PR this way still goes through the unsubmitted-review warning.
 </details>
 
 <details>
