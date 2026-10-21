@@ -11,8 +11,8 @@ const source = readFileSync(new URL("gh-pr-review-toolkit.user.js", root), "utf8
 const start = source.indexOf("// #region coverage-core");
 const end = source.indexOf("// #endregion coverage-core");
 if (start < 0 || end < 0) throw new Error("coverage-core region markers not found in gh-pr-review-toolkit.user.js");
-const { unzipText, isCobertura, parseCobertura, addReport, matchCoverage, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary } = new Function(
-  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, addReport, matchCoverage, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary };`,
+const { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary } = new Function(
+  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary };`,
 )();
 
 const coverageXml = () => readFileSync(fixture("pkg-coverage.xml"), "utf8");
@@ -40,30 +40,51 @@ test("parseCobertura reads sources and per-line hits", () => {
   assert.deepEqual([...r.files[0].lines], [[1, 1], [2, 1], [4, 0], [5, 3], [7, 0], [8, 1]]);
 });
 
+// A pytest-cov-shaped report; `sources` empty means no <source> element.
+const report = (sources, files) => ({ sources, files: files.map(([filename, lines]) => ({ filename, lines: new Map(lines) })) });
+
 test("addReport joins sources and keeps max hits across reports", () => {
-  const index = new Map();
-  addReport(index, parseCobertura(coverageXml()));
-  addReport(index, parseCobertura(coverageXml().replace('number="4" hits="0"', 'number="4" hits="2"')));
-  const lines = index.get("/home/runner/work/repo/repo/capabilities/pkg/src/pkg/cli.py");
+  const index = createCoverageIndex();
+  addReport(index, parseCobertura(coverageXml()), "a.xml");
+  addReport(index, parseCobertura(coverageXml().replace('number="4" hits="0"', 'number="4" hits="2"')), "b.xml");
+  const lines = index.lines.get("/home/runner/work/repo/repo/capabilities/pkg/src/pkg/cli.py");
   assert.equal(lines.get(4), 2);
   assert.equal(lines.get(7), 0);
-  assert.equal(index.has("pkg/cli.py"), false); // bare filename only when a report has no <source>
+  assert.equal(index.lines.has("pkg/cli.py"), false); // bare filename only when a report has no <source>
 });
 
-test("matchCoverage: suffix match picks the shortest strong key", () => {
-  const index = new Map([
-    ["/w/repo/repo/capabilities/pkg/src/pkg/cli.py", new Map([[1, 1]])],
-    ["/w/repo/repo/other/capabilities/pkg/src/pkg/cli.py", new Map([[1, 0]])],
-  ]);
-  assert.equal(matchCoverage("capabilities/pkg/src/pkg/cli.py", index).get(1), 1);
-  assert.equal(matchCoverage("capabilities/pkg/src/pkg/nope.py", index), null);
+test("matchCoverage anchors absolute report paths on the inferred checkout root", () => {
+  const index = createCoverageIndex();
+  const root = "/home/runner/work/repo/repo";
+  addReport(index, report([`${root}/capabilities/pkg/src`], [["pkg/cli.py", [[1, 1]]], ["pkg/fill.py", [[1, 0]]]]), "pkg.xml");
+  addReport(index, report([`${root}/services/x`], [["main.py", [[1, 1]]]]), "x.xml");
+  const matched = matchCoverage(["capabilities/pkg/src/pkg/cli.py", "capabilities/pkg/src/pkg/fill.py", "services/x/main.py", "main.py", "nope.py"], index);
+  assert.equal(matched.get("capabilities/pkg/src/pkg/cli.py").get(1), 1);
+  assert.equal(matched.get("services/x/main.py").get(1), 1);
+  assert.equal(matched.get("main.py"), null); // a root-level main.py must not borrow services/x/main.py
+  assert.equal(matched.get("nope.py"), null);
 });
 
-test("matchCoverage: bare-filename fallback only when exactly one matches", () => {
-  const one = new Map([["pkg/cli.py", new Map([[1, 1]])]]);
-  assert.equal(matchCoverage("a/src/pkg/cli.py", one).get(1), 1);
-  const two = new Map([["pkg/__init__.py", new Map()], ["src/pkg/__init__.py", new Map()]]);
-  assert.equal(matchCoverage("a/src/pkg/__init__.py", two), null);
+test("matchCoverage: relative keys are trusted only when unique and from one report", () => {
+  const one = createCoverageIndex();
+  addReport(one, report([], [["pkg/cli.py", [[1, 1]]]]), "a.xml");
+  addReport(one, report([], [["pkg/cli.py", [[1, 0]]]]), "a.xml"); // the same report from another matrix job
+  assert.equal(matchCoverage(["a/src/pkg/cli.py"], one).get("a/src/pkg/cli.py").get(1), 1);
+
+  const collided = createCoverageIndex();
+  addReport(collided, report(["src"], [["pkg/__init__.py", [[1, 1]]]]), "a/coverage.xml");
+  addReport(collided, report(["src"], [["pkg/__init__.py", [[1, 1]]]]), "b/coverage.xml");
+  assert.equal(matchCoverage(["b/src/pkg/__init__.py"], collided).get("b/src/pkg/__init__.py"), null);
+
+  const two = createCoverageIndex();
+  addReport(two, report([], [["pkg/__init__.py", []], ["src/pkg/__init__.py", []]]), "a.xml");
+  assert.equal(matchCoverage(["a/src/pkg/__init__.py"], two).get("a/src/pkg/__init__.py"), null);
+});
+
+test("coveredExtensions lists the file types the reports measure", () => {
+  const index = createCoverageIndex();
+  addReport(index, parseCobertura(coverageXml()), "a.xml");
+  assert.deepEqual([...coveredExtensions(index)], [".py"]);
 });
 
 test("fileCoverage counts only measured added lines", () => {

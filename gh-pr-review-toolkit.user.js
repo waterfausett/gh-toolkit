@@ -387,26 +387,60 @@
     return { sources, files };
   };
 
-  // A line counts as covered when any job ran it, so reports merge by max hits.
-  const addReport = (index, { sources, files }) => {
+  const createCoverageIndex = () => ({ lines: new Map(), origins: new Map(), ambiguous: new Set() });
+
+  const isAbsolutePath = (path) => path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
+
+  // A line counts as covered when any job ran it, so reports merge by max hits. A relative key can't tell two packages
+  // apart, so one that arrives from two differently named reports is marked ambiguous instead of trusted.
+  const addReport = (index, { sources, files }, name) => {
     for (const { filename, lines } of files) {
       for (const key of sources.length ? sources.map((s) => `${s}/${filename}`) : [filename]) {
-        const merged = index.get(key) ?? new Map();
+        if (!isAbsolutePath(key)) {
+          if (index.origins.has(key) && index.origins.get(key) !== name) index.ambiguous.add(key);
+          index.origins.set(key, name);
+        }
+        const merged = index.lines.get(key) ?? new Map();
         for (const [number, hits] of lines) merged.set(number, Math.max(merged.get(number) ?? 0, hits));
-        index.set(key, merged);
+        index.lines.set(key, merged);
       }
     }
   };
 
-  // Reports hold runner paths (/home/runner/work/<repo>/<repo>/<path>); the shortest key ending in the PR path is the repo-root one.
-  // A bare filename is only trusted when it's unambiguous, so a same-named file in another package never lends coverage.
-  const matchCoverage = (path, index) => {
-    const keys = [...index.keys()];
-    const strong = keys.filter((k) => k === path || k.endsWith(`/${path}`)).sort((a, b) => a.length - b.length);
-    if (strong.length) return index.get(strong[0]);
-    const weak = keys.filter((k) => path.endsWith(`/${k}`));
-    return weak.length === 1 ? index.get(weak[0]) : null;
+  const commonPrefix = (texts) =>
+    texts.reduce((prefix, text) => {
+      let i = 0;
+      while (i < prefix.length && prefix[i] === text[i]) i++;
+      return prefix.slice(0, i);
+    });
+
+  // Absolute keys are runner paths (/home/runner/work/<repo>/<repo>/<path>), so every real match shares one checkout root.
+  // The root most PR paths agree on anchors the rest; a bare suffix match could hand a root-level main.py another package's hits.
+  const matchCoverage = (paths, index) => {
+    const keys = [...index.lines.keys()];
+    const absolute = keys.filter(isAbsolutePath);
+    const ceiling = absolute.length ? commonPrefix(absolute) : "";
+    const votes = new Map();
+    for (const path of paths) {
+      const roots = new Set(absolute.filter((k) => k.endsWith(`/${path}`)).map((k) => k.slice(0, -path.length)));
+      for (const root of roots) if (ceiling.startsWith(root)) votes.set(root, (votes.get(root) ?? 0) + 1);
+    }
+    const root = [...votes].sort(([a, x], [b, y]) => y - x || a.length - b.length)[0]?.[0];
+    const relative = keys.filter((k) => !isAbsolutePath(k));
+    return new Map(
+      paths.map((path) => {
+        if (root !== undefined && index.lines.has(root + path)) return [path, index.lines.get(root + path)];
+        const candidates = relative.filter((k) => k === path || path.endsWith(`/${k}`) || k.endsWith(`/${path}`));
+        const only = candidates.length === 1 && !index.ambiguous.has(candidates[0]) ? candidates[0] : null;
+        return [path, only ? index.lines.get(only) : null];
+      }),
+    );
   };
+
+  const extensionOf = (path) => path.match(/\.[^./]+$/)?.[0]?.toLowerCase() ?? "";
+
+  // A file type no report measures (CSS in a Python repo) can't have coverage, so it isn't flagged as missing data.
+  const coveredExtensions = (index) => new Set([...index.lines.keys()].map(extensionOf).filter(Boolean));
 
   const fileCoverage = (added, lines) => {
     if (!lines) return null;
@@ -740,8 +774,11 @@
     };
   };
 
-  const setCoverage = (pr, coverage) => {
-    if (state.pr?.key !== pr.key) return;
+  // A run belongs to one load of the diff; once loadData replaces it, the run's results would mark the wrong lines.
+  const isCurrentRun = (pr, token) => state.pr?.key === pr.key && state.loadedAt === token;
+
+  const setCoverage = (pr, token, coverage) => {
+    if (!isCurrentRun(pr, token)) return;
     state.coverage = coverage;
     uncoveredCursor = -1;
     state.version += 1;
@@ -750,21 +787,24 @@
   };
 
   const loadCoverage = (pr) => {
-    if (!config.features.coverage || coverageRun?.key === pr.key) return coverageRun?.promise;
+    if (!config.features.coverage || !state.files) return null;
+    const token = state.loadedAt;
+    const key = `${pr.key}@${token}`;
+    if (coverageRun?.key === key) return coverageRun.promise;
     clearTimeout(coveragePoll);
-    const promise = computeCoverage(pr)
-      .catch((error) => setCoverage(pr, { status: "error", error: error?.message || "unexpected error" }))
+    const promise = computeCoverage(pr, token)
+      .catch((error) => setCoverage(pr, token, { status: "error", error: error?.message || "unexpected error" }))
       .finally(() => {
         if (coverageRun?.promise === promise) coverageRun = null;
       });
-    coverageRun = { key: pr.key, promise };
+    coverageRun = { key, promise };
     return promise;
   };
 
-  const computeCoverage = async (pr) => {
+  const computeCoverage = async (pr, token) => {
     const base = `https://github.com/${pr.owner}/${pr.repo}`;
     const head = state.commitOids?.at(-1) ?? (await loadCommitOids(pr))?.at(-1);
-    if (!head) return setCoverage(pr, { status: "error", error: "couldn't find the PR's head commit" });
+    if (!head) return setCoverage(pr, token, { status: "error", error: "couldn't find the PR's head commit" });
     let details = null;
     try {
       details = JSON.parse(
@@ -775,37 +815,41 @@
         })) ?? "null",
       );
     } catch {}
-    if (!details) return setCoverage(pr, { status: "error", head, error: "couldn't read the commit's checks" });
+    if (!details) return setCoverage(pr, token, { status: "error", head, error: "couldn't read the commit's checks" });
     const { pending, failed, runIds, jobIds } = parseStatusDetails(details);
-    // Re-running a job creates new job ids, so the stamp changes and a cached result is recomputed.
-    const stamp = digest(jobIds.join());
+    // Re-running a job creates new job ids, and a new artifact pattern picks different artifacts; either changes the stamp.
+    const stamp = digest(`${config.coverageArtifactPattern}|${jobIds.join()}`);
 
     const cached = store.get(coverageKey(pr));
     if (cached?.head === head && cached.stamp === stamp) {
-      return setCoverage(pr, cached.none ? { status: "none", head } : { status: "ready", head, run: cached.run, ...hydrateCoverage(cached) });
+      return setCoverage(pr, token, cached.none ? { status: "none", head } : { status: "ready", head, run: cached.run, ...hydrateCoverage(cached) });
     }
     // A partial merge would show lines as missed that a still-running job covers, so nothing is computed until CI settles.
     if (pending) {
-      setCoverage(pr, { status: store.get(coverageRepoKey(pr)) ? "waiting" : "quiet", head });
-      coveragePoll = setTimeout(() => state.pr?.key === pr.key && loadCoverage(pr), COVERAGE_POLL_MS);
+      setCoverage(pr, token, { status: store.get(coverageRepoKey(pr)) ? "waiting" : "quiet", head });
+      coveragePoll = setTimeout(() => isCurrentRun(pr, token) && loadCoverage(pr), COVERAGE_POLL_MS);
       return;
     }
 
-    setCoverage(pr, { status: "loading", head });
+    setCoverage(pr, token, { status: "loading", head });
     const pattern = new RegExp(config.coverageArtifactPattern, "i");
     const artifacts = [];
+    let unreadRuns = 0;
     for (const runId of runIds) {
       const html = await fetchText(`${base}/actions/runs/${runId}`);
+      if (!html) unreadRuns += 1;
       for (const row of html ? parseArtifactRows(html) : []) if (pattern.test(row.name)) artifacts.push({ ...row, runId });
     }
     const wanted = artifacts.filter((a) => (a.sizeMB ?? 0) <= MAX_ARTIFACT_MB);
-    let incomplete = failed || wanted.length < artifacts.length;
+    let incomplete = failed || unreadRuns > 0 || wanted.length < artifacts.length;
     if (!wanted.length) {
-      if (!artifacts.length) store.set(coverageKey(pr), { head, stamp, at: Date.now(), none: true });
-      return setCoverage(pr, artifacts.length ? { status: "error", head, error: `coverage artifacts are over ${MAX_ARTIFACT_MB} MB` } : { status: "none", head });
+      if (unreadRuns) return setCoverage(pr, token, { status: "error", head, error: "couldn't read the CI run pages" });
+      if (artifacts.length) return setCoverage(pr, token, { status: "error", head, error: `coverage artifacts are over ${MAX_ARTIFACT_MB} MB` });
+      if (isCurrentRun(pr, token)) store.set(coverageKey(pr), { head, stamp, at: Date.now(), none: true });
+      return setCoverage(pr, token, { status: "none", head });
     }
 
-    const index = new Map();
+    const index = createCoverageIndex();
     let done = 0;
     let downloaded = 0;
     const queue = [...wanted];
@@ -814,26 +858,30 @@
         const buffer = await fetchBuffer(`${base}/actions/runs/${artifact.runId}/artifacts/${artifact.id}`);
         try {
           if (!buffer) throw new Error("download failed");
-          for (const { text } of await unzipText(buffer, (name) => /\.xml$/i.test(name))) {
-            if (isCobertura(text)) addReport(index, parseCobertura(text));
+          for (const { name, text } of await unzipText(buffer, (entry) => /\.xml$/i.test(entry))) {
+            if (isCobertura(text)) addReport(index, parseCobertura(text), name);
           }
           downloaded += 1;
         } catch {
           incomplete = true;
         }
         done += 1;
-        setCoverage(pr, { status: "loading", head, progress: [done, wanted.length] });
+        setCoverage(pr, token, { status: "loading", head, progress: [done, wanted.length] });
       }
     };
     await Promise.all(Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, wanted.length) }, worker));
-    if (!downloaded) return setCoverage(pr, { status: "error", head, error: "couldn't download the coverage artifacts" });
+    if (!isCurrentRun(pr, token)) return;
+    if (!downloaded) return setCoverage(pr, token, { status: "error", head, error: "couldn't download the coverage artifacts" });
 
+    const candidates = coverageFiles();
+    const matched = matchCoverage(candidates.map((f) => f.filename), index);
+    const measuredTypes = coveredExtensions(index);
     const files = new Map();
     const noData = [];
-    for (const { filename, addedLines } of coverageFiles()) {
-      const result = fileCoverage(addedLines, matchCoverage(filename, index));
+    for (const { filename, addedLines } of candidates) {
+      const result = fileCoverage(addedLines, matched.get(filename));
       if (result) files.set(filename, result);
-      else if (categoryOf(filename) === "source") noData.push(filename);
+      else if (categoryOf(filename) === "source" && measuredTypes.has(extensionOf(filename))) noData.push(filename);
     }
     const run = wanted[0].runId;
     store.set(coverageRepoKey(pr), Date.now());
@@ -848,7 +896,7 @@
         noData: noData.map(digest),
       });
     }
-    setCoverage(pr, { status: "ready", head, run, incomplete, files, noData });
+    setCoverage(pr, token, { status: "ready", head, run, incomplete, files, noData });
   };
 
   const state = {
@@ -2979,7 +3027,7 @@
     state.version += 1;
     scan();
     renderPanel(true);
-    if (state.pr && state.files) loadCoverage(state.pr);
+    if (state.pr) loadCoverage(state.pr);
   };
 
   const settingRow = ({ key, label, hint, note }) =>
@@ -3932,6 +3980,7 @@
       renderPanel(true);
       // Leftovers are found while parsing the diff, so new patterns need a re-fetch.
       if (state.pr && JSON.stringify(config.leftoverPatterns) !== leftoverPatterns) loadData(state.pr);
+      else if (state.pr) loadCoverage(state.pr);
     } catch (err) {
       alert(`Invalid JSON: ${err.message}`);
     }
