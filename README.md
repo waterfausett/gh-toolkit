@@ -267,7 +267,7 @@ Reads the Cobertura XML coverage reports your CI already uploads as Actions arti
 - Next to "N / M viewed", a chip answers "how much of this PR's new code is covered?", for example **84% covered**, toned by the threshold. Hover it for the number of uncovered files and lines; click it to jump to the next uncovered line.
 - The panel's **New-line coverage** section shows the PR total, the CI run it came from, and the files that need attention, worst first: source files with no data, then files by missed lines.
 
-**When it loads:** opening a PR never downloads anything; coverage already cached for the PR's head commit shows straight away. With **Load coverage automatically on the Files tab** on (the default), artifacts are fetched the first time you open the PR's Files tab. Turn it off to fetch only when you click **Load coverage** in the panel.
+**When it loads:** opening a PR never downloads anything; coverage already cached for the PR's head commit shows straight away. With **Load coverage automatically on the Files tab** on (the default), artifacts are fetched the first time you open the PR's Files tab. Turn it off to fetch only when you click **Load coverage**, in the panel or in the coverage chip's spot next to "N / M viewed".
 
 Coverage is only computed once every Actions job on the PR's head commit has finished. While CI runs, the panel says it's waiting (in repos where coverage has been seen before) and checks again every minute. Coverage from an earlier commit is never shown on the current diff.
 

@@ -2584,7 +2584,9 @@
     const coverage = here ? readyCoverage() : null;
     const summary = coverage ? coverageSummary(coverage.files, coverage.noData) : null;
     const chip = summary ? coverageChip(summary) : null;
-    const counter = both || leftovers.length || deps.length || chip ? findViewedCounter() : null;
+    // In manual mode nothing loads on its own, so the chip's spot offers the load instead.
+    const idle = here && config.features.coverage && state.coverage?.status === "idle";
+    const counter = both || leftovers.length || deps.length || chip || idle ? findViewedCounter() : null;
     const text = both ? progressText(...both) : "";
     const title = both ? progressTitle(...both) : "";
     syncInline("prr-inline-progress", counter, text && `${text}|${title}`, () => h("span", { class: "prr-inline-progress", title }, text), "after");
@@ -2614,13 +2616,19 @@
     syncInline(
       "prr-inline-coverage",
       counter && (document.querySelector(".prr-inline-deps") ?? document.querySelector(".prr-inline-leftovers") ?? counterGroup(counter)),
-      chip ? `${chip.text}|${chip.title}` : "",
+      chip ? `${chip.text}|${chip.title}` : idle ? "idle" : "",
       () =>
-        h(
-          "button",
-          { class: `prr-badge prr-${coverageBadgeTone(summary.covered, summary.measured)} prr-inline-coverage`, type: "button", title: chip.title, onclick: stepCoverageChip },
-          chip.text,
-        ),
+        chip
+          ? h(
+              "button",
+              { class: `prr-badge prr-${coverageBadgeTone(summary.covered, summary.measured)} prr-inline-coverage`, type: "button", title: chip.title, onclick: stepCoverageChip },
+              chip.text,
+            )
+          : h(
+              "button",
+              { class: "prr-badge prr-muted prr-inline-coverage", type: "button", title: "Download this PR's coverage artifacts from CI", onclick: () => requestCoverage(state.pr) },
+              "Load coverage",
+            ),
       "before",
     );
   };
