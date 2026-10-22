@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.17.1
+// @version      0.17.0
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -471,14 +471,18 @@
 
   const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
-  // Files are what a reviewer acts on, so the chip counts them; line counts go in the tooltip.
+  // The chip answers one question, how much of the PR's new code is covered; the counts behind it go in the tooltip.
   const coverageChip = ({ attention, measured, covered }) => {
-    if (!attention.length) return null;
+    if (!attention.length) return measured ? { text: "100% covered", title: "All measured new lines covered" } : null;
     const lines = attention.reduce((sum, row) => sum + (row.missed?.length ?? 0), 0);
     const noData = attention.filter((row) => row.noData).length;
-    const details = [lines && plural(lines, "uncovered new line"), noData && `${plural(noData, "file")} with no coverage data`].filter(Boolean);
+    const details = [
+      plural(attention.length, "uncovered file"),
+      lines && plural(lines, "uncovered new line"),
+      noData && `${plural(noData, "file")} with no coverage data`,
+    ].filter(Boolean);
     return {
-      text: `${plural(attention.length, "uncovered file")}${measured ? ` · ${formatPct(covered, measured)} covered` : ""}`,
+      text: measured ? `${formatPct(covered, measured)} covered` : "no coverage data",
       title: `${details.join(" · ")}\nClick or Alt+U: jump to the next uncovered line`,
     };
   };
@@ -2084,8 +2088,9 @@
 
   // Files with no coverage data have no lines to step to, so the chip falls back to opening the first of them.
   const stepCoverageChip = () => {
-    if (uncoveredList().length) stepUncovered(1);
-    else if (readyCoverage()?.noData[0]) jumpToFile(readyCoverage().noData[0]);
+    const firstNoData = readyCoverage()?.noData[0];
+    if (!uncoveredList().length && firstNoData) jumpToFile(firstNoData);
+    else stepUncovered(1);
   };
 
   const stepUncovered = (direction) => {

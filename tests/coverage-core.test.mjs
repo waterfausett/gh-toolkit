@@ -156,24 +156,28 @@ test("coverageSummary totals measured lines and orders the attention list worst 
   assert.equal(s.attention[0].noData, true);
 });
 
-test("coverageChip counts uncovered files, with line counts in the tooltip", () => {
+test("coverageChip shows the PR percentage, with file and line counts in the tooltip", () => {
   const files = new Map([
     ["a/full.py", { measured: 10, missed: [] }],
     ["a/some.py", { measured: 10, missed: [3] }],
     ["a/many.py", { measured: 20, missed: [1, 2, 9] }],
   ]);
+  const hint = "\nClick or Alt+U: jump to the next uncovered line";
   assert.deepEqual(coverageChip(coverageSummary(files, ["a/new.py"])), {
-    text: "3 uncovered files · 90% covered",
-    title: "4 uncovered new lines · 1 file with no coverage data\nClick or Alt+U: jump to the next uncovered line",
+    text: "90% covered",
+    title: `3 uncovered files · 4 uncovered new lines · 1 file with no coverage data${hint}`,
   });
   assert.deepEqual(coverageChip(coverageSummary(new Map([["a/some.py", { measured: 10, missed: [3] }]]), [])), {
-    text: "1 uncovered file · 90% covered",
-    title: "1 uncovered new line\nClick or Alt+U: jump to the next uncovered line",
+    text: "90% covered",
+    title: `1 uncovered file · 1 uncovered new line${hint}`,
   });
   assert.deepEqual(coverageChip(coverageSummary(new Map(), ["a/new.py"])), {
-    text: "1 uncovered file",
-    title: "1 file with no coverage data\nClick or Alt+U: jump to the next uncovered line",
+    text: "no coverage data",
+    title: `1 uncovered file · 1 file with no coverage data${hint}`,
   });
-  assert.equal(coverageChip(coverageSummary(files, [])).text, "2 uncovered files · 90% covered");
-  assert.equal(coverageChip(coverageSummary(new Map([["a/full.py", { measured: 10, missed: [] }]]), [])), null);
+  assert.deepEqual(coverageChip(coverageSummary(new Map([["a/full.py", { measured: 10, missed: [] }]]), [])), {
+    text: "100% covered",
+    title: "All measured new lines covered",
+  });
+  assert.equal(coverageChip(coverageSummary(new Map([["a/comments.py", { measured: 0, missed: [] }]]), [])), null);
 });
