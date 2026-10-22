@@ -2104,13 +2104,21 @@
     jumpToLine(items[uncoveredCursor]);
   };
 
-  // GitHub renders diff rows lazily, so marks are re-applied on every scan; a new coverage result clears the old ones first.
-  // The new-side line-number cell; its next sibling is that line's code in both unified and split views.
   const findNewLineCell = (entry, line) => {
     const id = entry.el.id || state.pathToId.get(entry.path);
     const cell = id && document.getElementById(`${id}R${line}`);
     if (cell) return cell;
     return [...entry.el.querySelectorAll(`[data-line-number="${line}"]`)].find((node) => cellSide(node) === "R");
+  };
+
+  // The run of row cells from the new-side line number to the end: number, +/- marker and code in unified view, the right half in split view.
+  const newSideCells = (numberCell) => {
+    const row = numberCell.closest("tr, [role='row']");
+    let start = numberCell;
+    while (row && start.parentElement && start.parentElement !== row) start = start.parentElement;
+    const cells = [start];
+    for (let next = start.nextElementSibling; next; next = next.nextElementSibling) cells.push(next);
+    return cells;
   };
 
   const UNCOVERED_TITLE = "New line not covered by tests";
@@ -2120,8 +2128,8 @@
     const coverage = readyCoverage();
     const key = coverage ? String(state.version) : "";
     if (markedVersion !== key) {
-      for (const node of document.querySelectorAll(".prr-uncovered-num, .prr-uncovered-code")) {
-        node.classList.remove("prr-uncovered-num", "prr-uncovered-code");
+      for (const node of document.querySelectorAll(".prr-uncovered-start, .prr-uncovered-fill")) {
+        node.classList.remove("prr-uncovered-start", "prr-uncovered-fill");
         if (node.title === UNCOVERED_TITLE) node.removeAttribute("title");
       }
       markedVersion = key;
@@ -2129,12 +2137,13 @@
     if (!coverage || !FILES_PATH.test(location.pathname)) return;
     for (const entry of fileEntries()) {
       for (const line of coverage.files.get(entry.path)?.missed ?? []) {
-        const cell = findNewLineCell(entry, line);
-        if (!cell || cell.classList.contains("prr-uncovered-num")) continue;
-        cell.classList.add("prr-uncovered-num");
-        if (!cell.title) cell.title = UNCOVERED_TITLE;
-        const code = cell.nextElementSibling;
-        if (code && !code.hasAttribute("data-line-number")) code.classList.add("prr-uncovered-code");
+        const numberCell = findNewLineCell(entry, line);
+        if (!numberCell) continue;
+        const [first, ...rest] = newSideCells(numberCell);
+        if (first.classList.contains("prr-uncovered-start")) continue;
+        first.classList.add("prr-uncovered-start");
+        if (!first.title) first.title = UNCOVERED_TITLE;
+        for (const cell of rest) cell.classList.add("prr-uncovered-fill");
       }
     }
   };
@@ -3911,10 +3920,10 @@
     .prr-warn { background: var(--bgColor-attention-muted, #fff8c5); color: var(--fgColor-attention, #9a6700); }
     .prr-bad { background: var(--bgColor-danger-muted, #ffebe9); color: var(--fgColor-danger, #d1242f); }
     .prr-coverage-note { padding: 2px 6px; border-radius: 6px; }
-    .prr-uncovered-num { background: var(--bgColor-danger-muted, #ffebe9) !important; color: var(--fgColor-danger, #d1242f) !important;
-      font-weight: 600; box-shadow: inset 4px 0 0 var(--fgColor-danger, #d1242f); }
-    .prr-uncovered-code { background-image: linear-gradient(var(--bgColor-danger-muted, rgba(255, 129, 130, .25)), var(--bgColor-danger-muted, rgba(255, 129, 130, .25))) !important;
-      box-shadow: inset 2px 0 0 var(--fgColor-danger, #d1242f); }
+    /* GitHub paints added lines on the cells and sometimes on their children, so the tint overrides both. */
+    .prr-uncovered-start, .prr-uncovered-fill, .prr-uncovered-start > *, .prr-uncovered-fill > * {
+      background-color: var(--bgColor-danger-muted, #ffebe9) !important; }
+    .prr-uncovered-start { color: var(--fgColor-danger, #d1242f) !important; font-weight: 600; box-shadow: inset 4px 0 0 var(--fgColor-danger, #d1242f); }
     .prr-tree-dim > div { opacity: .55; }
     .prr-on { font-weight: 600; background: var(--bgColor-accent-muted, #ddf4ff); }
     .prr-badge.prr-muted { border: 1px solid var(--borderColor-default, #d0d7de); }
