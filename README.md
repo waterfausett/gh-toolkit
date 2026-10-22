@@ -267,6 +267,8 @@ Reads the Cobertura XML coverage reports your CI already uploads as Actions arti
 - Next to "N / M viewed", a chip answers "how much of this PR's new code is covered?", for example **84% covered**, toned by the threshold. Hover it for the number of uncovered files and lines; click it to jump to the next uncovered line.
 - The panel's **New-line coverage** section shows the PR total, the CI run it came from, and the files that need attention, worst first: source files with no data, then files by missed lines.
 
+**When it loads:** opening a PR never downloads anything; coverage already cached for the PR's head commit shows straight away. With **Load coverage automatically on the Files tab** on (the default), artifacts are fetched the first time you open the PR's Files tab. Turn it off to fetch only when you click **Load coverage** in the panel.
+
 Coverage is only computed once every Actions job on the PR's head commit has finished. While CI runs, the panel says it's waiting (in repos where coverage has been seen before) and checks again every minute. Coverage from an earlier commit is never shown on the current diff.
 
 | Config | Default | Meaning |
@@ -359,7 +361,7 @@ Up to three requests per PR, plus the coverage requests below, made by Tampermon
 | `/<owner>/<repo>/pull/<n>.diff` | The file list, per-file additions and deletions, and blob SHAs (from the diff's `index` lines). The same pass flags whitespace-only and rename-only files, scans added lines for debug leftovers and reads dependency manifests; only those results are kept, not the diff text. |
 | `/<owner>/<repo>/raw/HEAD/.github/CODEOWNERS` | Ownership (falling back to `CODEOWNERS` and `docs/CODEOWNERS`). |
 | `/<owner>/<repo>/pull/<n>/commits` | With `Accept: application/json`, for the PR's commit list and head SHA (while "New commits since your last look" or "New-line coverage" is on). This is roughly 2 KB per commit. |
-| `/<owner>/<repo>/commit/<head>/status-details` | New-line coverage: JSON listing the head commit's checks, to tell whether CI has finished and which Actions runs it used. |
+| `/<owner>/<repo>/commit/<head>/status-details` | New-line coverage, once you've asked for it (Files tab in auto mode, or the Load coverage button): JSON listing the head commit's checks, to tell whether CI has finished and which Actions runs it used. |
 | `/<owner>/<repo>/actions/runs/<id>` | New-line coverage: each run's page, for its artifact names and sizes. Only after CI has finished, and once per head commit. |
 | `/<owner>/<repo>/actions/runs/<id>/artifacts/<id>` | New-line coverage: the matching artifacts, 3 at a time. GitHub redirects these to `*.blob.core.windows.net`. They're unzipped in memory and only the line numbers are kept. |
 

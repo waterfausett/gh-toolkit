@@ -51,6 +51,7 @@
       collapseTrivial: true,
       leftovers: true,
       coverage: true,
+      coverageAuto: true,
       depSummary: true,
       pendingReviewGuard: true,
       sinceLastLook: true,
@@ -134,6 +135,7 @@
         { key: "collapseTrivial", label: "Collapse whitespace-only and rename-only files" },
         { key: "leftovers", label: "Flag debug leftovers in added lines", hint: "Alt+L / Alt+Shift+L", note: "console.log, debugger, TODO, .only( …: leftoverPatterns" },
         { key: "coverage", label: "New-line coverage from CI artifacts", hint: "Alt+U / Alt+Shift+U", note: "Cobertura XML in Actions artifacts; coverageArtifactPattern, coverageThreshold, coverageWarnMargin" },
+        { key: "coverageAuto", label: "Load coverage automatically on the Files tab", note: "Off: load it with the panel's Load coverage button" },
         { key: "sinceLastLook", label: "New commits since your last look", note: "Your last look is when you last marked a file Viewed" },
       ],
     },
@@ -519,6 +521,9 @@
         return [{ id, name: decodeXml(name), sizeMB: size ? Number(size[1]) * SIZE_UNITS_MB[size[2].toLowerCase()] : null }];
       });
 
+  // Opening a PR isn't a sign of reviewing it, so artifacts are only fetched once asked for (or, in auto mode, on the Files tab).
+  const coverageTrigger = ({ auto, onFilesTab, requested }) => (requested || (auto && onFilesTab) ? "load" : "cached");
+
   // data-diff-side is authoritative: the newer diff view classes a right-side line number "new-diff-line-number-left-side".
   const diffSideOf = (className, diffSide) =>
     diffSide ? (/^left$/i.test(diffSide) ? "L" : "R") : /delet|\bleft\b/i.test(className) ? "L" : "R";
@@ -768,6 +773,8 @@
   const DOWNLOAD_CONCURRENCY = 3;
   let coveragePoll = 0;
   let coverageRun = null;
+  // PRs whose coverage was asked for this session (button, or the Files tab in auto mode); only these fetch artifacts or poll CI.
+  const coverageRequested = new Set();
 
   const fetchBuffer = (url) =>
     new Promise((resolve) => {
@@ -808,6 +815,30 @@
     renderPanel(true);
   };
 
+  const cachedCoverage = (cached, head) =>
+    cached.none ? { status: "none", head } : { status: "ready", head, run: cached.run, ...hydrateCoverage(cached) };
+
+  const requestCoverage = (pr) => {
+    coverageRequested.add(pr.key);
+    return loadCoverage(pr);
+  };
+
+  // Called whenever the PR's data reloads: fetches only when coverage was asked for, otherwise shows what's cached for this head.
+  const refreshCoverage = async (pr) => {
+    if (!config.features.coverage || !state.files) return;
+    const trigger = coverageTrigger({
+      auto: config.features.coverageAuto,
+      onFilesTab: FILES_PATH.test(location.pathname),
+      requested: coverageRequested.has(pr.key),
+    });
+    if (trigger === "load") return requestCoverage(pr);
+    const token = state.loadedAt;
+    const head = state.commitOids?.at(-1) ?? (await loadCommitOids(pr))?.at(-1);
+    if (coverageRequested.has(pr.key)) return;
+    const cached = head ? store.get(coverageKey(pr)) : null;
+    setCoverage(pr, token, cached?.head === head ? cachedCoverage(cached, head) : { status: "idle", head });
+  };
+
   const loadCoverage = (pr) => {
     if (!config.features.coverage || !state.files) return null;
     const token = state.loadedAt;
@@ -843,9 +874,7 @@
     const stamp = digest(`${config.coverageArtifactPattern}|${jobIds.join()}`);
 
     const cached = store.get(coverageKey(pr));
-    if (cached?.head === head && cached.stamp === stamp) {
-      return setCoverage(pr, token, cached.none ? { status: "none", head } : { status: "ready", head, run: cached.run, ...hydrateCoverage(cached) });
-    }
+    if (cached?.head === head && cached.stamp === stamp) return setCoverage(pr, token, cachedCoverage(cached, head));
     // A partial merge would show lines as missed that a still-running job covers, so nothing is computed until CI settles.
     if (pending) {
       setCoverage(pr, token, { status: store.get(coverageRepoKey(pr)) ? "waiting" : "quiet", head });
@@ -1013,7 +1042,7 @@
     uncoveredCursor = -1;
     applyChangedFilter();
     renderPanel(true);
-    loadCoverage(pr);
+    refreshCoverage(pr);
   };
 
   const resetState = (pr) => {
@@ -2648,6 +2677,12 @@
     const title = "New-line coverage";
     const sha7 = c.head?.slice(0, 7) ?? "";
     const note = (text) => section(title, h("div", { class: "prr-muted" }, text));
+    if (c.status === "idle") {
+      return inlineSection(
+        title,
+        h("button", { class: "prr-btn", type: "button", title: "Download this PR's coverage artifacts from CI", onclick: () => requestCoverage(state.pr) }, "Load coverage"),
+      );
+    }
     if (c.status === "loading") return note(c.progress ? `Loading coverage ${c.progress[0]}/${c.progress[1]}…` : "Loading coverage…");
     if (c.status === "waiting") return note(`Waiting for CI on ${sha7}…`);
     if (c.status === "none") return note(`No coverage artifacts for ${sha7} (CI may not upload them, or they've expired)`);
@@ -3093,7 +3128,7 @@
     state.version += 1;
     scan();
     renderPanel(true);
-    if (state.pr) loadCoverage(state.pr);
+    if (state.pr) refreshCoverage(state.pr);
   };
 
   const settingRow = ({ key, label, hint, note }) =>
@@ -3849,6 +3884,9 @@
     pendingReviewCount();
     savePendingReview();
     markUncovered();
+    if (state.files && config.features.coverage && config.features.coverageAuto && FILES_PATH.test(location.pathname) && !coverageRequested.has(state.pr.key)) {
+      requestCoverage(state.pr);
+    }
   };
 
   GM_addStyle(`
@@ -4050,7 +4088,7 @@
       renderPanel(true);
       // Leftovers are found while parsing the diff, so new patterns need a re-fetch.
       if (state.pr && JSON.stringify(config.leftoverPatterns) !== leftoverPatterns) loadData(state.pr);
-      else if (state.pr) loadCoverage(state.pr);
+      else if (state.pr) refreshCoverage(state.pr);
     } catch (err) {
       alert(`Invalid JSON: ${err.message}`);
     }

@@ -11,8 +11,8 @@ const source = readFileSync(new URL("gh-pr-review-toolkit.user.js", root), "utf8
 const start = source.indexOf("// #region coverage-core");
 const end = source.indexOf("// #endregion coverage-core");
 if (start < 0 || end < 0) throw new Error("coverage-core region markers not found in gh-pr-review-toolkit.user.js");
-const { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary, coverageChip, diffSideOf } = new Function(
-  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary, coverageChip, diffSideOf };`,
+const { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary, coverageChip, diffSideOf, coverageTrigger } = new Function(
+  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary, coverageChip, diffSideOf, coverageTrigger };`,
 )();
 
 const coverageXml = () => readFileSync(fixture("pkg-coverage.xml"), "utf8");
@@ -188,4 +188,11 @@ test("diffSideOf trusts data-diff-side over class names", () => {
   assert.equal(diffSideOf("focusable-grid-cell new-diff-line-number-right-side", "left"), "L");
   assert.equal(diffSideOf("blob-num blob-num-deletion js-linkable-line-number", undefined), "L");
   assert.equal(diffSideOf("blob-num blob-num-addition js-linkable-line-number js-blob-rnum", undefined), "R");
+});
+
+test("coverageTrigger loads only on request or, in auto mode, on the Files tab", () => {
+  assert.equal(coverageTrigger({ auto: true, onFilesTab: true, requested: false }), "load");
+  assert.equal(coverageTrigger({ auto: true, onFilesTab: false, requested: false }), "cached");
+  assert.equal(coverageTrigger({ auto: false, onFilesTab: true, requested: false }), "cached");
+  assert.equal(coverageTrigger({ auto: false, onFilesTab: false, requested: true }), "load");
 });
