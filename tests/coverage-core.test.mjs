@@ -11,8 +11,8 @@ const source = readFileSync(new URL("gh-pr-review-toolkit.user.js", root), "utf8
 const start = source.indexOf("// #region coverage-core");
 const end = source.indexOf("// #endregion coverage-core");
 if (start < 0 || end < 0) throw new Error("coverage-core region markers not found in gh-pr-review-toolkit.user.js");
-const { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary } = new Function(
-  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary };`,
+const { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary, coverageChip } = new Function(
+  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary, coverageChip };`,
 )();
 
 const coverageXml = () => readFileSync(fixture("pkg-coverage.xml"), "utf8");
@@ -154,4 +154,26 @@ test("coverageSummary totals measured lines and orders the attention list worst 
   assert.equal(s.fully, 1);
   assert.deepEqual(s.attention.map((r) => r.path), ["a/new.py", "a/many.py", "a/some.py"]);
   assert.equal(s.attention[0].noData, true);
+});
+
+test("coverageChip counts uncovered files, with line counts in the tooltip", () => {
+  const files = new Map([
+    ["a/full.py", { measured: 10, missed: [] }],
+    ["a/some.py", { measured: 10, missed: [3] }],
+    ["a/many.py", { measured: 20, missed: [1, 2, 9] }],
+  ]);
+  assert.deepEqual(coverageChip(coverageSummary(files, ["a/new.py"])), {
+    text: "3 uncovered files · 90% covered",
+    title: "4 uncovered new lines · 1 file with no coverage data\nClick or Alt+U: jump to the next uncovered line",
+  });
+  assert.deepEqual(coverageChip(coverageSummary(new Map([["a/some.py", { measured: 10, missed: [3] }]]), [])), {
+    text: "1 uncovered file · 90% covered",
+    title: "1 uncovered new line\nClick or Alt+U: jump to the next uncovered line",
+  });
+  assert.deepEqual(coverageChip(coverageSummary(new Map(), ["a/new.py"])), {
+    text: "1 uncovered file",
+    title: "1 file with no coverage data\nClick or Alt+U: jump to the next uncovered line",
+  });
+  assert.equal(coverageChip(coverageSummary(files, [])).text, "2 uncovered files · 90% covered");
+  assert.equal(coverageChip(coverageSummary(new Map([["a/full.py", { measured: 10, missed: [] }]]), [])), null);
 });

@@ -469,6 +469,20 @@
     };
   };
 
+  const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+
+  // Files are what a reviewer acts on, so the chip counts them; line counts go in the tooltip.
+  const coverageChip = ({ attention, measured, covered }) => {
+    if (!attention.length) return null;
+    const lines = attention.reduce((sum, row) => sum + (row.missed?.length ?? 0), 0);
+    const noData = attention.filter((row) => row.noData).length;
+    const details = [lines && plural(lines, "uncovered new line"), noData && `${plural(noData, "file")} with no coverage data`].filter(Boolean);
+    return {
+      text: `${plural(attention.length, "uncovered file")}${measured ? ` · ${formatPct(covered, measured)} covered` : ""}`,
+      title: `${details.join(" · ")}\nClick or Alt+U: jump to the next uncovered line`,
+    };
+  };
+
   const ACTIONS_JOB = /\/actions\/runs\/(\d+)\/job\/(\d+)/;
   const PASSING_STATES = new Set(["success", "skipped", "neutral"]);
 
@@ -1185,8 +1199,9 @@
   const readyCoverage = () => (config.features.coverage && state.coverage?.status === "ready" ? state.coverage : null);
 
   const COVERAGE_BADGE_TONES = { ok: "done", warn: "warn", bad: "bad" };
-  const coverageBadge = (text, covered, measured) =>
-    badge(text, COVERAGE_BADGE_TONES[coverageTone((100 * covered) / measured, config.coverageThreshold, config.coverageWarnMargin)]);
+  const coverageBadgeTone = (covered, measured) =>
+    measured ? COVERAGE_BADGE_TONES[coverageTone((100 * covered) / measured, config.coverageThreshold, config.coverageWarnMargin)] : "bad";
+  const coverageBadge = (text, covered, measured) => badge(text, coverageBadgeTone(covered, measured));
 
   const fileLeftovers = (path) => (config.features.leftovers && !isGenerated(path) && state.byPath.get(path)?.leftovers) || [];
 
@@ -1345,15 +1360,19 @@
     const ownership = config.features.ownership;
     const changedPaths = config.features.viewedAcrossPushes && state.pr ? changedSinceViewed() : [];
     const filterByChanged = changedFilterActive();
+    const coverage = readyCoverage();
     for (const item of document.querySelectorAll("[role='tree'] [role='treeitem']")) {
       const folder = isTreeFolder(item);
-      const path = dimTests || ownership || changedPaths.length ? treePath(item) : "";
+      const path = dimTests || ownership || changedPaths.length || coverage ? treePath(item) : "";
       const isTest = dimTests && categoryOf(folder ? `${path}/_` : path) === "tests";
       const notMine = ownership && !folder && isMine(path) === false;
       item.classList.toggle("prr-tree-dim", isTest);
       item.classList.toggle("prr-tree-notmine", notMine);
       setTreeMark(item, "notmine", "Not mine (CODEOWNERS)", notMine);
       setTreeMark(item, "changed", "Changed since you viewed it", !folder && changedPaths.includes(path));
+      const missed = !folder && coverage ? (coverage.files.get(path)?.missed.length ?? 0) : 0;
+      const noData = !folder && Boolean(coverage?.noData.includes(path));
+      setTreeMark(item, "uncovered", noData ? "No coverage data" : `${plural(missed, "uncovered new line")}`, missed > 0 || noData);
       item.classList.toggle("prr-tree-hide", filterByChanged && outsideChangedSet(path, folder, changedPaths));
     }
   };
@@ -2063,6 +2082,12 @@
     return (state.files ?? []).flatMap((file) => (coverage.files.get(file.filename)?.missed ?? []).map((line) => ({ path: file.filename, line })));
   };
 
+  // Files with no coverage data have no lines to step to, so the chip falls back to opening the first of them.
+  const stepCoverageChip = () => {
+    if (uncoveredList().length) stepUncovered(1);
+    else if (readyCoverage()?.noData[0]) jumpToFile(readyCoverage().noData[0]);
+  };
+
   const stepUncovered = (direction) => {
     const items = uncoveredList();
     if (!items.length) {
@@ -2075,16 +2100,37 @@
   };
 
   // GitHub renders diff rows lazily, so marks are re-applied on every scan; a new coverage result clears the old ones first.
+  // The new-side line-number cell; its next sibling is that line's code in both unified and split views.
+  const findNewLineCell = (entry, line) => {
+    const id = entry.el.id || state.pathToId.get(entry.path);
+    const cell = id && document.getElementById(`${id}R${line}`);
+    if (cell) return cell;
+    return [...entry.el.querySelectorAll(`[data-line-number="${line}"]`)].find((node) => cellSide(node) === "R");
+  };
+
+  const UNCOVERED_TITLE = "New line not covered by tests";
+
+  // GitHub renders diff rows lazily, so marks are re-applied on every scan; a new coverage result clears the old ones first.
   const markUncovered = () => {
     const coverage = readyCoverage();
     const key = coverage ? String(state.version) : "";
     if (markedVersion !== key) {
-      document.querySelectorAll(".prr-uncovered").forEach((node) => node.classList.remove("prr-uncovered"));
+      for (const node of document.querySelectorAll(".prr-uncovered-num, .prr-uncovered-code")) {
+        node.classList.remove("prr-uncovered-num", "prr-uncovered-code");
+        if (node.title === UNCOVERED_TITLE) node.removeAttribute("title");
+      }
       markedVersion = key;
     }
     if (!coverage || !FILES_PATH.test(location.pathname)) return;
     for (const entry of fileEntries()) {
-      for (const line of coverage.files.get(entry.path)?.missed ?? []) findLineRow(entry, line)?.classList.add("prr-uncovered");
+      for (const line of coverage.files.get(entry.path)?.missed ?? []) {
+        const cell = findNewLineCell(entry, line);
+        if (!cell || cell.classList.contains("prr-uncovered-num")) continue;
+        cell.classList.add("prr-uncovered-num");
+        if (!cell.title) cell.title = UNCOVERED_TITLE;
+        const code = cell.nextElementSibling;
+        if (code && !code.hasAttribute("data-line-number")) code.classList.add("prr-uncovered-code");
+      }
     }
   };
 
@@ -2488,8 +2534,10 @@
     const both = here ? snapshot?.progressBoth : null;
     const leftovers = here && config.features.leftovers ? leftoverList() : [];
     const deps = here && config.features.depSummary ? allDeps() : [];
-    const uncovered = here ? uncoveredList() : [];
-    const counter = both || leftovers.length || deps.length || uncovered.length ? findViewedCounter() : null;
+    const coverage = here ? readyCoverage() : null;
+    const summary = coverage ? coverageSummary(coverage.files, coverage.noData) : null;
+    const chip = summary ? coverageChip(summary) : null;
+    const counter = both || leftovers.length || deps.length || chip ? findViewedCounter() : null;
     const text = both ? progressText(...both) : "";
     const title = both ? progressTitle(...both) : "";
     syncInline("prr-inline-progress", counter, text && `${text}|${title}`, () => h("span", { class: "prr-inline-progress", title }, text), "after");
@@ -2519,12 +2567,12 @@
     syncInline(
       "prr-inline-coverage",
       counter && (document.querySelector(".prr-inline-deps") ?? document.querySelector(".prr-inline-leftovers") ?? counterGroup(counter)),
-      uncovered.length ? String(uncovered.length) : "",
+      chip ? `${chip.text}|${chip.title}` : "",
       () =>
         h(
           "button",
-          { class: "prr-badge prr-warn prr-inline-coverage", type: "button", title: "New lines no test ran: jump to the next (Alt+U)", onclick: () => stepUncovered(1) },
-          `${uncovered.length} uncovered`,
+          { class: `prr-badge prr-${coverageBadgeTone(summary.covered, summary.measured)} prr-inline-coverage`, type: "button", title: chip.title, onclick: stepCoverageChip },
+          chip.text,
         ),
       "before",
     );
@@ -3858,7 +3906,10 @@
     .prr-warn { background: var(--bgColor-attention-muted, #fff8c5); color: var(--fgColor-attention, #9a6700); }
     .prr-bad { background: var(--bgColor-danger-muted, #ffebe9); color: var(--fgColor-danger, #d1242f); }
     .prr-coverage-note { padding: 2px 6px; border-radius: 6px; }
-    .prr-uncovered > td:first-child, .prr-uncovered:not(tr) { box-shadow: inset 3px 0 0 var(--fgColor-danger, #d1242f); }
+    .prr-uncovered-num { background: var(--bgColor-danger-muted, #ffebe9) !important; color: var(--fgColor-danger, #d1242f) !important;
+      font-weight: 600; box-shadow: inset 4px 0 0 var(--fgColor-danger, #d1242f); }
+    .prr-uncovered-code { background-image: linear-gradient(var(--bgColor-danger-muted, rgba(255, 129, 130, .25)), var(--bgColor-danger-muted, rgba(255, 129, 130, .25))) !important;
+      box-shadow: inset 2px 0 0 var(--fgColor-danger, #d1242f); }
     .prr-tree-dim > div { opacity: .55; }
     .prr-on { font-weight: 600; background: var(--bgColor-accent-muted, #ddf4ff); }
     .prr-badge.prr-muted { border: 1px solid var(--borderColor-default, #d0d7de); }
@@ -3866,6 +3917,7 @@
     .prr-tree-dot { flex: none; align-self: center; width: 7px; height: 7px; margin: 0 8px 0 6px; border-radius: 50%; }
     .prr-tree-dot-notmine { background: var(--fgColor-attention, #9a6700); }
     .prr-tree-dot-changed { background: var(--fgColor-accent, #0969da); }
+    .prr-tree-dot-uncovered { background: var(--fgColor-danger, #d1242f); }
     .prr-body-hidden, .prr-filter-hide { display: none !important; }
     #prr-toast { position: fixed; left: 50%; bottom: 24px; z-index: 100; transform: translateX(-50%); padding: 6px 14px;
       font-size: 12px; border-radius: 8px; background: var(--bgColor-emphasis, #24292f); color: var(--fgColor-onEmphasis, #fff);

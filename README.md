@@ -262,7 +262,9 @@ On the Files tab a **N leftovers** badge also sits before GitHub's "N / M viewed
 Reads the Cobertura XML coverage reports your CI already uploads as Actions artifacts, and checks them against the PR's added lines only. Coverage of lines the PR didn't touch is ignored. Reports from several jobs are merged: a line counts as covered if any job ran it. Blank lines, comments and anything else the report doesn't count as code are left out of the percentage.
 
 - Each changed source file gets a **NN% covered** badge (hover for the missed line numbers), or **no coverage data** when no report mentions it. Test, docs, config and generated files get nothing.
-- Uncovered new lines get a red mark in the gutter. <kbd>Alt</kbd>+<kbd>U</kbd> / <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>U</kbd>, or the **N uncovered** badge next to "N / M viewed", jumps between them.
+- Uncovered new lines are highlighted in red: the new-side line number and the line's code. Hover the line number for "New line not covered by tests". <kbd>Alt</kbd>+<kbd>U</kbd> / <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>U</kbd> jumps between them.
+- Files with uncovered new lines or no coverage data get a red dot in the file tree (hover for the count).
+- Next to "N / M viewed", a chip such as **3 uncovered files · 84% covered** (toned by the threshold) sums up the PR. Hover it for the number of uncovered lines; click it to jump to the next one.
 - The panel's **New-line coverage** section shows the PR total, the CI run it came from, and the files that need attention, worst first: source files with no data, then files by missed lines.
 
 Coverage is only computed once every Actions job on the PR's head commit has finished. While CI runs, the panel says it's waiting (in repos where coverage has been seen before) and checks again every minute. Coverage from an earlier commit is never shown on the current diff.
