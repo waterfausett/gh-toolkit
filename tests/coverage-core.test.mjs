@@ -11,8 +11,8 @@ const source = readFileSync(new URL("gh-pr-review-toolkit.user.js", root), "utf8
 const start = source.indexOf("// #region coverage-core");
 const end = source.indexOf("// #endregion coverage-core");
 if (start < 0 || end < 0) throw new Error("coverage-core region markers not found in gh-pr-review-toolkit.user.js");
-const { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary, coverageChip } = new Function(
-  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary, coverageChip };`,
+const { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary, coverageChip, diffSideOf } = new Function(
+  `${source.slice(start, end)}\nreturn { unzipText, isCobertura, parseCobertura, createCoverageIndex, addReport, matchCoverage, coveredExtensions, fileCoverage, formatPct, coverageTone, parseStatusDetails, parseArtifactRows, coverageSummary, coverageChip, diffSideOf };`,
 )();
 
 const coverageXml = () => readFileSync(fixture("pkg-coverage.xml"), "utf8");
@@ -180,4 +180,12 @@ test("coverageChip shows the PR percentage, with file and line counts in the too
     title: "All measured new lines covered",
   });
   assert.equal(coverageChip(coverageSummary(new Map([["a/comments.py", { measured: 0, missed: [] }]]), [])), null);
+});
+
+test("diffSideOf trusts data-diff-side over class names", () => {
+  // GitHub's newer diff view puts a right-side line number in a cell classed "...-left-side".
+  assert.equal(diffSideOf("focusable-grid-cell new-diff-line-number-left-side", "right"), "R");
+  assert.equal(diffSideOf("focusable-grid-cell new-diff-line-number-right-side", "left"), "L");
+  assert.equal(diffSideOf("blob-num blob-num-deletion js-linkable-line-number", undefined), "L");
+  assert.equal(diffSideOf("blob-num blob-num-addition js-linkable-line-number js-blob-rnum", undefined), "R");
 });

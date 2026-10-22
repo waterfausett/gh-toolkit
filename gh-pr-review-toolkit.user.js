@@ -518,6 +518,10 @@
         const size = row.match(/<td[^>]*>\s*([\d.]+)\s*(Bytes?|KB|MB|GB)\s*</i);
         return [{ id, name: decodeXml(name), sizeMB: size ? Number(size[1]) * SIZE_UNITS_MB[size[2].toLowerCase()] : null }];
       });
+
+  // data-diff-side is authoritative: the newer diff view classes a right-side line number "new-diff-line-number-left-side".
+  const diffSideOf = (className, diffSide) =>
+    diffSide ? (/^left$/i.test(diffSide) ? "L" : "R") : /delet|\bleft\b/i.test(className) ? "L" : "R";
   // #endregion coverage-core
 
   const NPM_SECTION = /^(dependencies|devDependencies|peerDependencies|optionalDependencies)$/;
@@ -1662,7 +1666,7 @@
     flash(target.el);
   };
 
-  const cellSide = (cell) => (/delet|\bleft\b/i.test(`${cell.className} ${cell.dataset.diffSide ?? ""}`) ? "L" : "R");
+  const cellSide = (cell) => diffSideOf(cell.className, cell.dataset.diffSide);
 
   const rowLine = (row) => {
     const cell = [...row.querySelectorAll("[data-line-number]")].at(-1);
