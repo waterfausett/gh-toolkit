@@ -13,6 +13,7 @@ The owner's two favourite stories, in order:
 
 - A hero GIF under the title, about 10–15 s, going from a repo's Pull requests page into a PR and through the panel.
 - One still screenshot per feature group (Navigation, Review progress, Less noise, Writing reviews, Insights, Beyond the PR page), shown above that group's `<details>` list, plus one of the Actions workflow filter.
+- A screenshot of **new-line coverage** on a PR: the "NN% covered" chip, per-file badges, red uncovered lines and the panel's coverage section.
 - Everything delivered on the `readme-screenshots` branch as a PR for review.
 
 ## Non-goals
@@ -49,6 +50,10 @@ PRs (about 5–8), each built to light up specific features:
 | PR left with a pending (unsubmitted) review | pending chip/badge on list |
 | One or two plain PRs for list volume, one starred, one saved for later | list chips, saved searches |
 
+**Coverage:** the repo uses Vitest with `@vitest/coverage-v8` and the `cobertura` reporter. A GitHub Actions workflow on `pull_request` checks out the PR head SHA (per the README's "What CI needs to do") and uploads the XML with `actions/upload-artifact` in an artifact named `coverage`. One PR's tests deliberately leave a few new lines unrun (an error branch, a fallback) so the result lands in the amber band (~70–79%) with visible red lines, rather than all green.
+
+The stand-in `GM_xmlhttpRequest` can't follow the artifact download's redirect to `blob.core.windows.net` (CORS). For `…/actions/runs/<run>/artifacts/<id>` URLs, the builder downloads the same zip with `gh api repos/<owner>/<repo>/actions/artifacts/<id>/zip`, passes it into the page (e.g. base64 via `orca eval`) and has the stand-in return those bytes for that URL. The script parses the real artifact; only the transport differs.
+
 Several PRs being authored by `waterfausett` is fine ("My PRs"); review-state scenarios that need "someone else's PR" may be approximated, since there is one account.
 
 ## Calls made in writing this up (owner to check)
@@ -63,5 +68,4 @@ Several PRs being authored by `waterfausett` is fine ("My PRs"); review-state sc
 - Which config the injected script runs with (e.g. `myOwners`, a saved search or two) — set via the stand-in storage.
 - Viewport size and light vs dark theme — pick one theme for the whole set; consistent cropping.
 - How the GIF is made: Orca screen capture if it supports video, otherwise a sequence of screenshots stitched into a GIF (ffmpeg or a Node library in the scratchpad). Keep it small enough for a README (aim < 5 MB).
-- New-line coverage: include only if the demo repo's CI artifact can be fetched through the `GM_xmlhttpRequest` stand-in (cross-origin to `blob.core.windows.net` may be blocked); otherwise leave it out without comment.
 - README layout details: image widths, alt text, whether the hero sits above or below the install badges.
