@@ -12,6 +12,10 @@ No token needed: it reads GitHub through your already signed-in browser session.
 
 [Install](#-install) · [Setup](#-first-time-setup) · [Shortcuts](#-keyboard-shortcuts) · [Features](#-features) · [How data is loaded](#-how-data-is-loaded) · [Maintenance](#-maintenance-notes)
 
+<br>
+
+<img src="docs/images/hero.gif" width="860" alt="The toolkit on a repo's Pull requests page (Starred, Later, Recent and Pending chips, review badges, ticket chips), then on a PR's Files tab: the review panel with progress, change stats, debug leftovers, new-line coverage and dependencies, and the quick file jump">
+
 </div>
 
 ---
@@ -65,11 +69,15 @@ Every feature has a toggle in the settings modal, opened with the ⚙ in the pan
 | <kbd>Alt</kbd>+<kbd>/</kbd> | Show enabled shortcuts |
 | <kbd>Alt</kbd>+<kbd>,</kbd> | Settings |
 
+<img src="docs/images/shortcuts.png" width="760" alt="The keyboard shortcut help opened with Alt+/ over a PR's Files tab">
+
 ## ✨ Features
 
 Click any feature for the details.
 
 ### 🧭 Navigation
+
+<img src="docs/images/quick-jump.png" width="760" alt="Quick file jump (Alt+P) filtering a PR's files by name, with the review panel's tab nav on the right">
 
 <details>
 <summary><b>Always-visible tab nav</b> — Conversation / Commits / Checks / Files in the panel</summary>
@@ -122,6 +130,8 @@ Click **?** in the panel bar or press <kbd>Alt</kbd>+<kbd>/</kbd> to list every 
 
 ### 📊 Review progress
 
+<img src="docs/images/review-panel.png" width="760" alt="A PR's Files tab with the review panel: line-weighted progress, change stats, bulk mark viewed, and 1 new commit since your last look; a blue dot in the file tree marks a viewed file that changed again">
+
 <details>
 <summary><b>Review progress meter</b> — line-weighted progress bar on every PR tab</summary>
 <br>
@@ -162,6 +172,8 @@ Files tab only. **Mark viewed** buttons for generated, test and not-mine files, 
 </details>
 
 ### 🧹 Less noise
+
+<img src="docs/images/less-noise.png" width="640" alt="Renamed and whitespace-only files collapsed with badges, and an amber dot in the file tree on a file owned by someone else">
 
 <details>
 <summary><b>Collapse test and generated files</b></summary>
@@ -207,6 +219,8 @@ Off by default. Redirects to `?w=1` once per tab per PR, and never when the URL 
 
 ### ✍️ Writing reviews
 
+<img src="docs/images/snippets.png" width="760" alt="A comment box where typing ;test and a space expanded to &quot;Can we add a test covering this?&quot;">
+
 <details>
 <summary><b>Suggestion from selection</b> — selected lines → <code>```suggestion</code> comment</summary>
 <br>
@@ -236,6 +250,8 @@ If your pending review has comments, closing the tab, reloading or following a l
 </details>
 
 ### 🔍 Insights
+
+<img src="docs/images/coverage.png" width="760" alt="New-line coverage on a PR: uncovered new lines highlighted in red, an 82% covered badge on the file, and the panel's debug leftovers, coverage and dependency sections">
 
 <details>
 <summary><b>Change stats</b> — additions and deletions by category</summary>
@@ -309,6 +325,8 @@ Own row under the nav. IDs come from the PR title and branch name. `AB#123` is t
 
 ### 🌐 Beyond the PR page
 
+<img src="docs/images/pr-lists.png" width="760" alt="A repo's Pull requests page with Starred, Later, Recent and Pending chips and saved searches under the search box, and per-row badges: reviewed, 9% reviewed, 1 new commit, 2 unsubmitted, dependency and ticket chips">
+
 <details>
 <summary><b>Review badges in PR lists</b> — progress, new commits and unsubmitted reviews at a glance</summary>
 <br>
@@ -351,6 +369,12 @@ A PR's header gets **☆ Star** and **🔖 Save for later** next to its state la
 
 Each chip is an ordinary query: GitHub's Pull requests search ORs the `#n` refs, so you can open one and add filters. Every chip query ends in `#pr_number_exact_match`: GitHub also adds a full-text match on all the terms, so a lone `#7` would pull in #17 and #77, and a term no PR contains empties that half and leaves only the listed numbers. A chip is hidden while its list is empty, and the count is what's stored, not what GitHub shows. Each list has its own toggle under **PR lists** in the settings. Only the lowercased `owner/repo` and PR numbers are stored, under `prLists`, never titles.
 </details>
+
+### ⚙️ Actions workflow filter
+
+A separate script ([install](https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-actions-workflow-filter.user.js)): a filter box at the top of the workflows sidebar on Actions pages, with a match count.
+
+<img src="docs/images/workflow-filter.png" width="760" alt="The workflows sidebar on a repo's Actions page filtered to &quot;deploy&quot;, showing 2 of 9 workflows">
 
 ## 📡 How data is loaded
 
