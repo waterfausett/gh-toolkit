@@ -1,0 +1,71 @@
+{
+  "checkRuns": [
+    {
+      "state": "failure",
+      "description": "96.66% of diff hit (target 100.00%)",
+      "targetUrl": "/pytest-dev/pytest/runs/119417806014",
+      "name": "codecov/patch",
+      "icon": "x",
+      "avatarUrl": "/apps/codecov",
+      "avatarDescription": "@codecov generated this status.",
+      "avatarLogo": "https://avatars.githubusercontent.com/in/254?s=60&v=4",
+      "avatarBackgroundColor": "#ffffff",
+      "additionalContext": "Failing after 1s",
+      "pending": false
+    },
+    {
+      "state": "success",
+      "description": "Read the Docs build succeeded!",
+      "targetUrl": "https://pytest--15238.org.readthedocs.build/en/15238/",
+      "name": "docs/readthedocs.org:pytest",
+      "icon": "check",
+      "avatarUrl": "https://readthedocs.org",
+      "avatarDescription": "Read the Docs Community (readthedocs.org) (@readthedocs) generated this status.",
+      "avatarLogo": "https://avatars.githubusercontent.com/oa/121738?s=80&u=0f2d91b048b026e3aa31b4c8cf49f90900a2fb0d&v=4",
+      "avatarBackgroundColor": "#2f2e25",
+      "additionalContext": "",
+      "pending": false
+    },
+    {
+      "state": "success",
+      "description": null,
+      "targetUrl": "/pytest-dev/pytest/actions/runs/39653514710/job/119408658536",
+      "name": "test / build (doctesting) (pull_request)",
+      "icon": "check",
+      "avatarUrl": "/apps/github-actions",
+      "avatarDescription": "@github-actions generated this status.",
+      "avatarLogo": "https://avatars.githubusercontent.com/in/15368?s=60&v=4",
+      "avatarBackgroundColor": "#ffffff",
+      "additionalContext": "Successful in 41s",
+      "pending": false
+    },
+    {
+      "state": "success",
+      "description": null,
+      "targetUrl": "/pytest-dev/pytest/actions/runs/39653514710/job/119408658646",
+      "name": "test / build (macos-py310) (pull_request)",
+      "icon": "check",
+      "avatarUrl": "/apps/github-actions",
+      "avatarDescription": "@github-actions generated this status.",
+      "avatarLogo": "https://avatars.githubusercontent.com/in/15368?s=60&v=4",
+      "avatarBackgroundColor": "#ffffff",
+      "additionalContext": "Successful in 1m",
+      "pending": false
+    },
+    {
+      "state": "success",
+      "description": null,
+      "targetUrl": "/pytest-dev/pytest/actions/runs/39653514710/job/119408658405",
+      "name": "test / build (macos-py312) (pull_request)",
+      "icon": "check",
+      "avatarUrl": "/apps/github-actions",
+      "avatarDescription": "@github-actions generated this status.",
+      "avatarLogo": "https://avatars.githubusercontent.com/in/15368?s=60&v=4",
+      "avatarBackgroundColor": "#ffffff",
+      "additionalContext": "Successful in 1m",
+      "pending": false
+    }
+  ],
+  "checksHeaderState": "UNSUCCESSFUL",
+  "checksStatusSummary": "35 successful and 1 failing checks"
+}

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.16.3
+// @version      0.17.0
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -17,6 +17,7 @@
 // @connect      github.com
 // @connect      raw.githubusercontent.com
 // @connect      patch-diff.githubusercontent.com
+// @connect      blob.core.windows.net
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -49,6 +50,8 @@
       suggestFromSelection: true,
       collapseTrivial: true,
       leftovers: true,
+      coverage: true,
+      coverageAuto: true,
       depSummary: true,
       pendingReviewGuard: true,
       sinceLastLook: true,
@@ -85,6 +88,9 @@
       "\\.min\\.(js|css)$",
       "(^|/)dist/",
     ],
+    coverageArtifactPattern: "cov",
+    coverageThreshold: 80,
+    coverageWarnMargin: 10,
     adoBase: "",
     myOwners: [],
     minePatterns: [],
@@ -128,6 +134,8 @@
         { key: "copyPermalink", label: "Copy selected lines as a quote with link", hint: "Alt+C" },
         { key: "collapseTrivial", label: "Collapse whitespace-only and rename-only files" },
         { key: "leftovers", label: "Flag debug leftovers in added lines", hint: "Alt+L / Alt+Shift+L", note: "console.log, debugger, TODO, .only( …: leftoverPatterns" },
+        { key: "coverage", label: "New-line coverage from CI artifacts", hint: "Alt+U / Alt+Shift+U", note: "Cobertura XML in Actions artifacts; coverageArtifactPattern, coverageThreshold, coverageWarnMargin" },
+        { key: "coverageAuto", label: "Load coverage automatically on the Files tab", note: "Off: load it with the panel's Load coverage button" },
         { key: "sinceLastLook", label: "New commits since your last look", note: "Your last look is when you last marked a file Viewed" },
       ],
     },
@@ -205,6 +213,7 @@
 
   const DAY_MS = 24 * 60 * 60 * 1000;
   const PR_RETENTION_MS = 90 * DAY_MS;
+  const COVERAGE_RETENTION_MS = 7 * DAY_MS;
 
   const touchPr = (id) => {
     const lastSeen = store.get("prLastSeen", {});
@@ -222,7 +231,13 @@
       GM_deleteValue(`v3:changedFilter:${id}`);
       GM_deleteValue(`v3:lastLook:${id}`);
       GM_deleteValue(`v3:summary:${id}`);
+      GM_deleteValue(`v3:coverage:${id}`);
       delete lastSeen[id];
+    }
+    // Coverage is only a shortcut around re-downloading artifacts, so it expires much sooner than other PR data.
+    for (const key of GM_listValues()) {
+      if (key.startsWith("v3:coverage:") && now - (GM_getValue(key)?.at ?? 0) >= COVERAGE_RETENTION_MS) GM_deleteValue(key);
+      else if (key.startsWith("v3:coverageRepo:") && now - (GM_getValue(key) ?? 0) >= PR_RETENTION_MS) GM_deleteValue(key);
     }
     store.set("prLastSeen", lastSeen);
     const pending = store.get("pendingReviews", {});
@@ -315,6 +330,204 @@
     });
 
   const stripWs = (text) => text.replace(/\s+/g, "");
+
+  // #region coverage-core — pure: no DOM, GM_* or toolkit state (tests/coverage-core.test.mjs evaluates this block)
+  const inflateRaw = async (bytes) =>
+    new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer());
+
+  // Reads the central directory rather than walking local headers, which may defer sizes to a data descriptor.
+  const unzipText = async (buffer, want) => {
+    const view = new DataView(buffer);
+    const bytes = new Uint8Array(buffer);
+    let eocd = -1;
+    for (let i = buffer.byteLength - 22; i >= Math.max(0, buffer.byteLength - 65557); i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) throw new Error("not a zip file");
+    const count = view.getUint16(eocd + 10, true);
+    let p = view.getUint32(eocd + 16, true);
+    const out = [];
+    for (let n = 0; n < count; n++) {
+      if (p + 46 > buffer.byteLength || view.getUint32(p, true) !== 0x02014b50) throw new Error("corrupt zip directory");
+      const method = view.getUint16(p + 10, true);
+      const size = view.getUint32(p + 20, true);
+      const nameLength = view.getUint16(p + 28, true);
+      const local = view.getUint32(p + 42, true);
+      const name = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + nameLength));
+      p += 46 + nameLength + view.getUint16(p + 30, true) + view.getUint16(p + 32, true);
+      if (!want(name) || (method !== 0 && method !== 8)) continue;
+      const begin = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+      const raw = bytes.subarray(begin, begin + size);
+      out.push({ name, text: new TextDecoder().decode(method === 8 ? await inflateRaw(raw) : raw) });
+    }
+    return out;
+  };
+
+  const isCobertura = (text) => /<coverage[\s>]/.test(text.slice(0, 2000));
+
+  const XML_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+  const decodeXml = (text) => text.replace(/&(amp|lt|gt|quot|apos);/g, (_, name) => XML_ENTITIES[name]);
+  const xmlAttr = (attrs, name) => attrs.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
+
+  // Regex rather than DOMParser so Node can run it; Cobertura from coverage.py and istanbul is regular enough.
+  const parseCobertura = (xml) => {
+    const sources = [...xml.matchAll(/<source>([^<]*)<\/source>/g)].map((m) => decodeXml(m[1].trim()).replace(/\/$/, "")).filter(Boolean);
+    const files = [...xml.matchAll(/<class\b([^>]*)>([\s\S]*?)<\/class>/g)].flatMap(([, attrs, body]) => {
+      const filename = xmlAttr(attrs, "filename");
+      if (!filename) return [];
+      const lines = new Map();
+      for (const [, lineAttrs] of body.matchAll(/<line\b([^>]*)>/g)) {
+        const number = Number(xmlAttr(lineAttrs, "number"));
+        const hits = Number(xmlAttr(lineAttrs, "hits")) || 0;
+        if (number) lines.set(number, Math.max(lines.get(number) ?? 0, hits));
+      }
+      return [{ filename: decodeXml(filename), lines }];
+    });
+    return { sources, files };
+  };
+
+  const createCoverageIndex = () => ({ lines: new Map(), origins: new Map(), ambiguous: new Set() });
+
+  const isAbsolutePath = (path) => path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
+
+  // A line counts as covered when any job ran it, so reports merge by max hits. A relative key can't tell two packages
+  // apart, so one that arrives from two differently named reports is marked ambiguous instead of trusted.
+  const addReport = (index, { sources, files }, name) => {
+    for (const { filename, lines } of files) {
+      for (const key of sources.length ? sources.map((s) => `${s}/${filename}`) : [filename]) {
+        if (!isAbsolutePath(key)) {
+          if (index.origins.has(key) && index.origins.get(key) !== name) index.ambiguous.add(key);
+          index.origins.set(key, name);
+        }
+        const merged = index.lines.get(key) ?? new Map();
+        for (const [number, hits] of lines) merged.set(number, Math.max(merged.get(number) ?? 0, hits));
+        index.lines.set(key, merged);
+      }
+    }
+  };
+
+  const commonPrefix = (texts) =>
+    texts.reduce((prefix, text) => {
+      let i = 0;
+      while (i < prefix.length && prefix[i] === text[i]) i++;
+      return prefix.slice(0, i);
+    });
+
+  // Absolute keys are runner paths (/home/runner/work/<repo>/<repo>/<path>), so every real match shares one checkout root.
+  // The root most PR paths agree on anchors the rest; a bare suffix match could hand a root-level main.py another package's hits.
+  const matchCoverage = (paths, index) => {
+    const keys = [...index.lines.keys()];
+    const absolute = keys.filter(isAbsolutePath);
+    const ceiling = absolute.length ? commonPrefix(absolute) : "";
+    const votes = new Map();
+    for (const path of paths) {
+      const roots = new Set(absolute.filter((k) => k.endsWith(`/${path}`)).map((k) => k.slice(0, -path.length)));
+      for (const root of roots) if (ceiling.startsWith(root)) votes.set(root, (votes.get(root) ?? 0) + 1);
+    }
+    const root = [...votes].sort(([a, x], [b, y]) => y - x || a.length - b.length)[0]?.[0];
+    const relative = keys.filter((k) => !isAbsolutePath(k));
+    return new Map(
+      paths.map((path) => {
+        if (root !== undefined && index.lines.has(root + path)) return [path, index.lines.get(root + path)];
+        const candidates = relative.filter((k) => k === path || path.endsWith(`/${k}`) || k.endsWith(`/${path}`));
+        const only = candidates.length === 1 && !index.ambiguous.has(candidates[0]) ? candidates[0] : null;
+        return [path, only ? index.lines.get(only) : null];
+      }),
+    );
+  };
+
+  const extensionOf = (path) => path.match(/\.[^./]+$/)?.[0]?.toLowerCase() ?? "";
+
+  // A file type no report measures (CSS in a Python repo) can't have coverage, so it isn't flagged as missing data.
+  const coveredExtensions = (index) => new Set([...index.lines.keys()].map(extensionOf).filter(Boolean));
+
+  const fileCoverage = (added, lines) => {
+    if (!lines) return null;
+    const measured = added.filter((line) => lines.has(line));
+    return { measured: measured.length, missed: measured.filter((line) => !lines.get(line)) };
+  };
+
+  const formatPct = (covered, measured) => `${Math.floor((100 * covered) / measured)}%`;
+
+  const coverageTone = (pct, threshold, margin) => (pct >= threshold ? "ok" : pct >= threshold - margin ? "warn" : "bad");
+
+  // Source files with no data come first: they may be entirely untested and would otherwise go unnoticed.
+  const coverageSummary = (files, noData) => {
+    const values = [...files.values()];
+    const measured = values.reduce((sum, f) => sum + f.measured, 0);
+    const missed = values.reduce((sum, f) => sum + f.missed.length, 0);
+    const withMisses = [...files]
+      .filter(([, f]) => f.missed.length)
+      .sort(([a, x], [b, y]) => y.missed.length - x.missed.length || a.localeCompare(b))
+      .map(([path, f]) => ({ path, ...f }));
+    return {
+      measured,
+      covered: measured - missed,
+      fully: values.filter((f) => f.measured && !f.missed.length).length,
+      attention: [...noData.map((path) => ({ path, noData: true })), ...withMisses],
+    };
+  };
+
+  const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+
+  // The chip answers one question, how much of the PR's new code is covered; the counts behind it go in the tooltip.
+  const coverageChip = ({ attention, measured, covered }) => {
+    if (!attention.length) return measured ? { text: "100% covered", title: "All measured new lines covered" } : null;
+    const lines = attention.reduce((sum, row) => sum + (row.missed?.length ?? 0), 0);
+    const noData = attention.filter((row) => row.noData).length;
+    const details = [
+      plural(attention.length, "uncovered file"),
+      lines && plural(lines, "uncovered new line"),
+      noData && `${plural(noData, "file")} with no coverage data`,
+    ].filter(Boolean);
+    return {
+      text: measured ? `${formatPct(covered, measured)} covered` : "no coverage data",
+      title: `${details.join(" · ")}\nClick or Alt+U: jump to the next uncovered line`,
+    };
+  };
+
+  const ACTIONS_JOB = /\/actions\/runs\/(\d+)\/job\/(\d+)/;
+  const PASSING_STATES = new Set(["success", "skipped", "neutral"]);
+
+  // status-details lists every check on one commit; only Actions jobs can carry artifacts.
+  const parseStatusDetails = (json) => {
+    const jobs = (Array.isArray(json?.checkRuns) ? json.checkRuns : [])
+      .map((run) => ({ run, m: String(run?.targetUrl ?? "").match(ACTIONS_JOB) }))
+      .filter(({ m }) => m);
+    return {
+      pending: jobs.some(({ run }) => run.pending === true),
+      failed: jobs.some(({ run }) => run.pending !== true && !PASSING_STATES.has(run.state)),
+      runIds: [...new Set(jobs.map(({ m }) => m[1]))],
+      jobIds: jobs.map(({ m }) => m[2]).sort(),
+    };
+  };
+
+  const SIZE_UNITS_MB = { byte: 1 / 1048576, bytes: 1 / 1048576, kb: 1 / 1024, mb: 1, gb: 1024 };
+
+  const parseArtifactRows = (html) =>
+    html
+      .split('data-artifact-id="')
+      .slice(1)
+      .flatMap((chunk) => {
+        const id = chunk.match(/^\d+/)?.[0];
+        if (!id) return [];
+        const rowEnd = chunk.indexOf("</tr>");
+        const row = rowEnd < 0 ? chunk : chunk.slice(0, rowEnd);
+        const name = row.match(/class="[^"]*\btext-bold\b[^"]*"[^>]*>\s*([^<]*?)\s*</)?.[1] ?? "";
+        const size = row.match(/<td[^>]*>\s*([\d.]+)\s*(Bytes?|KB|MB|GB)\s*</i);
+        return [{ id, name: decodeXml(name), sizeMB: size ? Number(size[1]) * SIZE_UNITS_MB[size[2].toLowerCase()] : null }];
+      });
+
+  // Opening a PR isn't a sign of reviewing it, so artifacts are only fetched once asked for (or, in auto mode, on the Files tab).
+  const coverageTrigger = ({ auto, onFilesTab, requested }) => (requested || (auto && onFilesTab) ? "load" : "cached");
+
+  // data-diff-side is authoritative: the newer diff view classes a right-side line number "new-diff-line-number-left-side".
+  const diffSideOf = (className, diffSide) =>
+    diffSide ? (/^left$/i.test(diffSide) ? "L" : "R") : /delet|\bleft\b/i.test(className) ? "L" : "R";
+  // #endregion coverage-core
 
   const NPM_SECTION = /^(dependencies|devDependencies|peerDependencies|optionalDependencies)$/;
   const NPM_VERSION = /^([~^<>=*]|v?\d|latest$|next$|(workspace|npm|file|link|portal|catalog|github|https?|git(\+[a-z]+)?):)/;
@@ -445,14 +658,17 @@
       const { renamed, similarity, hunks, other, whitespaceOnly, oldDeps, newDeps } = scratch;
       if (renamed && !hunks && !other && similarity === 100) current.trivial = "renamed";
       else if (hunks && whitespaceOnly && !other) current.trivial = "whitespace";
-      if (current.trivial) current.leftovers = [];
+      if (current.trivial) {
+        current.leftovers = [];
+        current.addedLines = [];
+      }
       current.deps = diffDeps(oldDeps, newDeps);
     };
     for (const line of text.split("\n")) {
       if (line.startsWith("diff --git ")) {
         endFile();
         const m = line.match(/^diff --git a\/(.+) b\/(.+)$/);
-        current = { filename: m ? m[2] : line.slice(11), sha: "", additions: 0, deletions: 0, trivial: "", leftovers: [], deps: [] };
+        current = { filename: m ? m[2] : line.slice(11), sha: "", additions: 0, deletions: 0, trivial: "", leftovers: [], deps: [], addedLines: [] };
         scratch = { renamed: false, similarity: 0, hunks: 0, other: false, whitespaceOnly: true, oldDeps: new Map(), newDeps: new Map() };
         files.push(current);
       } else if (!current) {
@@ -482,7 +698,10 @@
       } else if (line[0] !== "\\") {
         const sign = line[0] ?? " ";
         const content = line.slice(1);
-        if (sign === "+") current.additions += 1;
+        if (sign === "+") {
+          current.additions += 1;
+          current.addedLines.push(hunk.newLine);
+        }
         else if (sign === "-") current.deletions += 1;
         if (scratch.whitespaceOnly) {
           const stripped = stripWs(content);
@@ -549,6 +768,188 @@
       }),
     );
 
+  const COVERAGE_POLL_MS = 60_000;
+  const MAX_ARTIFACT_MB = 50;
+  const DOWNLOAD_CONCURRENCY = 3;
+  let coveragePoll = 0;
+  let coverageRun = null;
+  // PRs whose coverage was asked for this session (button, or the Files tab in auto mode); only these fetch artifacts or poll CI.
+  const coverageRequested = new Set();
+
+  const fetchBuffer = (url) =>
+    new Promise((resolve) => {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        responseType: "arraybuffer",
+        timeout: 120_000,
+        onload: (res) => resolve(res.status === 200 && res.response?.byteLength ? res.response : null),
+        onerror: () => resolve(null),
+        ontimeout: () => resolve(null),
+      });
+    });
+
+  const coverageKey = (pr) => `v3:coverage:${digest(pr.key)}`;
+  const coverageRepoKey = (pr) => `v3:coverageRepo:${digest(`${pr.owner}/${pr.repo}`)}`;
+
+  const coverageFiles = () => (state.files ?? []).filter((f) => f.addedLines.length && !f.trivial && !isGenerated(f.filename));
+
+  // The cache holds only salted path hashes and numbers; paths are recovered by hashing the PR's current files.
+  const hydrateCoverage = (entry) => {
+    const byDigest = new Map(coverageFiles().map((f) => [digest(f.filename), f.filename]));
+    return {
+      files: new Map(Object.entries(entry.files).flatMap(([id, value]) => (byDigest.has(id) ? [[byDigest.get(id), value]] : []))),
+      noData: entry.noData.flatMap((id) => (byDigest.has(id) ? [byDigest.get(id)] : [])),
+    };
+  };
+
+  // A run belongs to one load of the diff; once loadData replaces it, the run's results would mark the wrong lines.
+  const isCurrentRun = (pr, token) => state.pr?.key === pr.key && state.loadedAt === token;
+
+  const setCoverage = (pr, token, coverage) => {
+    if (!isCurrentRun(pr, token)) return;
+    state.coverage = coverage;
+    uncoveredCursor = -1;
+    state.version += 1;
+    scan();
+    renderPanel(true);
+  };
+
+  const cachedCoverage = (cached, head) =>
+    cached.none ? { status: "none", head } : { status: "ready", head, run: cached.run, ...hydrateCoverage(cached) };
+
+  const requestCoverage = (pr) => {
+    coverageRequested.add(pr.key);
+    return loadCoverage(pr);
+  };
+
+  // Called whenever the PR's data reloads: fetches only when coverage was asked for, otherwise shows what's cached for this head.
+  const refreshCoverage = async (pr) => {
+    if (!config.features.coverage || !state.files) return;
+    const trigger = coverageTrigger({
+      auto: config.features.coverageAuto,
+      onFilesTab: FILES_PATH.test(location.pathname),
+      requested: coverageRequested.has(pr.key),
+    });
+    if (trigger === "load") return requestCoverage(pr);
+    const token = state.loadedAt;
+    const head = state.commitOids?.at(-1) ?? (await loadCommitOids(pr))?.at(-1);
+    if (coverageRequested.has(pr.key)) return;
+    const cached = head ? store.get(coverageKey(pr)) : null;
+    setCoverage(pr, token, cached?.head === head ? cachedCoverage(cached, head) : { status: "idle", head });
+  };
+
+  const loadCoverage = (pr) => {
+    if (!config.features.coverage || !state.files) return null;
+    const token = state.loadedAt;
+    const key = `${pr.key}@${token}`;
+    if (coverageRun?.key === key) return coverageRun.promise;
+    clearTimeout(coveragePoll);
+    const promise = computeCoverage(pr, token)
+      .catch((error) => setCoverage(pr, token, { status: "error", error: error?.message || "unexpected error" }))
+      .finally(() => {
+        if (coverageRun?.promise === promise) coverageRun = null;
+      });
+    coverageRun = { key, promise };
+    return promise;
+  };
+
+  const computeCoverage = async (pr, token) => {
+    const base = `https://github.com/${pr.owner}/${pr.repo}`;
+    const head = state.commitOids?.at(-1) ?? (await loadCommitOids(pr))?.at(-1);
+    if (!head) return setCoverage(pr, token, { status: "error", error: "couldn't find the PR's head commit" });
+    let details = null;
+    try {
+      details = JSON.parse(
+        (await fetchText(`${base}/commit/${head}/status-details`, {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+          "GitHub-Verified-Fetch": "true",
+        })) ?? "null",
+      );
+    } catch {}
+    if (!details) return setCoverage(pr, token, { status: "error", head, error: "couldn't read the commit's checks" });
+    const { pending, failed, runIds, jobIds } = parseStatusDetails(details);
+    // Re-running a job creates new job ids, and a new artifact pattern picks different artifacts; either changes the stamp.
+    const stamp = digest(`${config.coverageArtifactPattern}|${jobIds.join()}`);
+
+    const cached = store.get(coverageKey(pr));
+    if (cached?.head === head && cached.stamp === stamp) return setCoverage(pr, token, cachedCoverage(cached, head));
+    // A partial merge would show lines as missed that a still-running job covers, so nothing is computed until CI settles.
+    if (pending) {
+      setCoverage(pr, token, { status: store.get(coverageRepoKey(pr)) ? "waiting" : "quiet", head });
+      coveragePoll = setTimeout(() => isCurrentRun(pr, token) && loadCoverage(pr), COVERAGE_POLL_MS);
+      return;
+    }
+
+    setCoverage(pr, token, { status: "loading", head });
+    const pattern = new RegExp(config.coverageArtifactPattern, "i");
+    const artifacts = [];
+    let unreadRuns = 0;
+    for (const runId of runIds) {
+      const html = await fetchText(`${base}/actions/runs/${runId}`);
+      if (!html) unreadRuns += 1;
+      for (const row of html ? parseArtifactRows(html) : []) if (pattern.test(row.name)) artifacts.push({ ...row, runId });
+    }
+    const wanted = artifacts.filter((a) => (a.sizeMB ?? 0) <= MAX_ARTIFACT_MB);
+    let incomplete = failed || unreadRuns > 0 || wanted.length < artifacts.length;
+    if (!wanted.length) {
+      if (unreadRuns) return setCoverage(pr, token, { status: "error", head, error: "couldn't read the CI run pages" });
+      if (artifacts.length) return setCoverage(pr, token, { status: "error", head, error: `coverage artifacts are over ${MAX_ARTIFACT_MB} MB` });
+      if (isCurrentRun(pr, token)) store.set(coverageKey(pr), { head, stamp, at: Date.now(), none: true });
+      return setCoverage(pr, token, { status: "none", head });
+    }
+
+    const index = createCoverageIndex();
+    let done = 0;
+    let downloaded = 0;
+    const queue = [...wanted];
+    const worker = async () => {
+      for (let artifact = queue.shift(); artifact; artifact = queue.shift()) {
+        const buffer = await fetchBuffer(`${base}/actions/runs/${artifact.runId}/artifacts/${artifact.id}`);
+        try {
+          if (!buffer) throw new Error("download failed");
+          for (const { name, text } of await unzipText(buffer, (entry) => /\.xml$/i.test(entry))) {
+            if (isCobertura(text)) addReport(index, parseCobertura(text), name);
+          }
+          downloaded += 1;
+        } catch {
+          incomplete = true;
+        }
+        done += 1;
+        setCoverage(pr, token, { status: "loading", head, progress: [done, wanted.length] });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, wanted.length) }, worker));
+    if (!isCurrentRun(pr, token)) return;
+    if (!downloaded) return setCoverage(pr, token, { status: "error", head, error: "couldn't download the coverage artifacts" });
+
+    const candidates = coverageFiles();
+    const matched = matchCoverage(candidates.map((f) => f.filename), index);
+    const measuredTypes = coveredExtensions(index);
+    const files = new Map();
+    const noData = [];
+    for (const { filename, addedLines } of candidates) {
+      const result = fileCoverage(addedLines, matched.get(filename));
+      if (result) files.set(filename, result);
+      else if (categoryOf(filename) === "source" && measuredTypes.has(extensionOf(filename))) noData.push(filename);
+    }
+    const run = wanted[0].runId;
+    store.set(coverageRepoKey(pr), Date.now());
+    // A failed job or unreadable artifact may be fixed by a re-run on the same head, so partial results aren't cached.
+    if (!incomplete) {
+      store.set(coverageKey(pr), {
+        head,
+        stamp,
+        at: Date.now(),
+        run,
+        files: Object.fromEntries([...files].map(([path, value]) => [digest(path), value])),
+        noData: noData.map(digest),
+      });
+    }
+    setCoverage(pr, token, { status: "ready", head, run, incomplete, files, noData });
+  };
+
   const state = {
     pr: null,
     files: null,
@@ -560,12 +961,16 @@
     byPath: new Map(),
     pathToId: new Map(),
     commitOids: null,
+    coverage: null,
   };
   const userExpanded = new Set();
   let panelOpen = store.get("panelOpen", true);
   let lastSignature = "";
   let threadCursor = -1;
   let leftoverCursor = -1;
+  let uncoveredCursor = -1;
+  let coverageExpanded = false;
+  let markedVersion = "";
 
   const codeownersRegex = (pattern) => {
     const anchored = pattern.startsWith("/") || pattern.slice(0, -1).includes("/");
@@ -634,8 +1039,10 @@
       commitOids,
     });
     leftoverCursor = -1;
+    uncoveredCursor = -1;
     applyChangedFilter();
     renderPanel(true);
+    refreshCoverage(pr);
   };
 
   const resetState = (pr) => {
@@ -650,10 +1057,14 @@
       byPath: new Map(),
       pathToId: new Map(),
       commitOids: null,
+      coverage: null,
     });
+    clearTimeout(coveragePoll);
     userExpanded.clear();
     threadCursor = -1;
     leftoverCursor = -1;
+    uncoveredCursor = -1;
+    coverageExpanded = false;
     applyNoiseDefault();
   };
 
@@ -822,6 +1233,13 @@
 
   const trivialReason = (path) => (config.features.collapseTrivial && TRIVIAL_REASONS[state.byPath.get(path)?.trivial]) || "";
 
+  const readyCoverage = () => (config.features.coverage && state.coverage?.status === "ready" ? state.coverage : null);
+
+  const COVERAGE_BADGE_TONES = { ok: "done", warn: "warn", bad: "bad" };
+  const coverageBadgeTone = (covered, measured) =>
+    measured ? COVERAGE_BADGE_TONES[coverageTone((100 * covered) / measured, config.coverageThreshold, config.coverageWarnMargin)] : "bad";
+  const coverageBadge = (text, covered, measured) => badge(text, coverageBadgeTone(covered, measured));
+
   const fileLeftovers = (path) => (config.features.leftovers && !isGenerated(path) && state.byPath.get(path)?.leftovers) || [];
 
   const setCollapsed = ({ el, actions }, collapsed) => {
@@ -871,6 +1289,15 @@
     if (leftovers.length) {
       const title = leftovers.map((item) => `L${item.line} ${item.label}: ${item.text}`).join("\n");
       actions.prepend(Object.assign(badge(`${leftovers.length} leftover${leftovers.length === 1 ? "" : "s"}`, "warn"), { title }));
+    }
+    const coverage = readyCoverage();
+    const covered = coverage?.files.get(path);
+    if (covered?.measured) {
+      const { measured, missed } = covered;
+      const title = missed.length ? `Missed new lines: ${missed.join(", ")}` : "All measured new lines covered";
+      actions.prepend(Object.assign(coverageBadge(`${formatPct(measured - missed.length, measured)} covered`, measured - missed.length, measured), { title }));
+    } else if (coverage?.noData.includes(path)) {
+      actions.prepend(Object.assign(badge("no coverage data", "bad"), { title: "Changed source file not found in any coverage report" }));
     }
     if (collapseReason) {
       const chevron = findChevron(entry);
@@ -970,15 +1397,19 @@
     const ownership = config.features.ownership;
     const changedPaths = config.features.viewedAcrossPushes && state.pr ? changedSinceViewed() : [];
     const filterByChanged = changedFilterActive();
+    const coverage = readyCoverage();
     for (const item of document.querySelectorAll("[role='tree'] [role='treeitem']")) {
       const folder = isTreeFolder(item);
-      const path = dimTests || ownership || changedPaths.length ? treePath(item) : "";
+      const path = dimTests || ownership || changedPaths.length || coverage ? treePath(item) : "";
       const isTest = dimTests && categoryOf(folder ? `${path}/_` : path) === "tests";
       const notMine = ownership && !folder && isMine(path) === false;
       item.classList.toggle("prr-tree-dim", isTest);
       item.classList.toggle("prr-tree-notmine", notMine);
       setTreeMark(item, "notmine", "Not mine (CODEOWNERS)", notMine);
       setTreeMark(item, "changed", "Changed since you viewed it", !folder && changedPaths.includes(path));
+      const missed = !folder && coverage ? (coverage.files.get(path)?.missed.length ?? 0) : 0;
+      const noData = !folder && Boolean(coverage?.noData.includes(path));
+      setTreeMark(item, "uncovered", noData ? "No coverage data" : `${plural(missed, "uncovered new line")}`, missed > 0 || noData);
       item.classList.toggle("prr-tree-hide", filterByChanged && outsideChangedSet(path, folder, changedPaths));
     }
   };
@@ -1264,7 +1695,7 @@
     flash(target.el);
   };
 
-  const cellSide = (cell) => (/delet|\bleft\b/i.test(`${cell.className} ${cell.dataset.diffSide ?? ""}`) ? "L" : "R");
+  const cellSide = (cell) => diffSideOf(cell.className, cell.dataset.diffSide);
 
   const rowLine = (row) => {
     const cell = [...row.querySelectorAll("[data-line-number]")].at(-1);
@@ -1665,7 +2096,7 @@
     attempt();
   };
 
-  const jumpToLeftover = (item) => {
+  const jumpToLine = (item) => {
     const id = state.pathToId.get(item.path);
     if (FILES_PATH.test(location.pathname)) revealLine(item);
     else goTo(`${tabHref(NAV_TABS[3])}${id ? `#${id}R${item.line}` : ""}`);
@@ -1679,7 +2110,75 @@
     }
     leftoverCursor =
       leftoverCursor < 0 ? (direction > 0 ? 0 : items.length - 1) : (leftoverCursor + direction + items.length) % items.length;
-    jumpToLeftover(items[leftoverCursor]);
+    jumpToLine(items[leftoverCursor]);
+  };
+
+  const uncoveredList = () => {
+    const coverage = readyCoverage();
+    if (!coverage) return [];
+    return (state.files ?? []).flatMap((file) => (coverage.files.get(file.filename)?.missed ?? []).map((line) => ({ path: file.filename, line })));
+  };
+
+  // Files with no coverage data have no lines to step to, so the chip falls back to opening the first of them.
+  const stepCoverageChip = () => {
+    const firstNoData = readyCoverage()?.noData[0];
+    if (!uncoveredList().length && firstNoData) jumpToFile(firstNoData);
+    else stepUncovered(1);
+  };
+
+  const stepUncovered = (direction) => {
+    const items = uncoveredList();
+    if (!items.length) {
+      toast(readyCoverage() ? "No uncovered new lines" : "Coverage not loaded yet");
+      return;
+    }
+    uncoveredCursor =
+      uncoveredCursor < 0 ? (direction > 0 ? 0 : items.length - 1) : (uncoveredCursor + direction + items.length) % items.length;
+    jumpToLine(items[uncoveredCursor]);
+  };
+
+  const findNewLineCell = (entry, line) => {
+    const id = entry.el.id || state.pathToId.get(entry.path);
+    const cell = id && document.getElementById(`${id}R${line}`);
+    if (cell) return cell;
+    return [...entry.el.querySelectorAll(`[data-line-number="${line}"]`)].find((node) => cellSide(node) === "R");
+  };
+
+  // The run of row cells from the new-side line number to the end: number, +/- marker and code in unified view, the right half in split view.
+  const newSideCells = (numberCell) => {
+    const row = numberCell.closest("tr, [role='row']");
+    let start = numberCell;
+    while (row && start.parentElement && start.parentElement !== row) start = start.parentElement;
+    const cells = [start];
+    for (let next = start.nextElementSibling; next; next = next.nextElementSibling) cells.push(next);
+    return cells;
+  };
+
+  const UNCOVERED_TITLE = "New line not covered by tests";
+
+  // GitHub renders diff rows lazily, so marks are re-applied on every scan; a new coverage result clears the old ones first.
+  const markUncovered = () => {
+    const coverage = readyCoverage();
+    const key = coverage ? String(state.version) : "";
+    if (markedVersion !== key) {
+      for (const node of document.querySelectorAll(".prr-uncovered-start, .prr-uncovered-fill")) {
+        node.classList.remove("prr-uncovered-start", "prr-uncovered-fill");
+        if (node.title === UNCOVERED_TITLE) node.removeAttribute("title");
+      }
+      markedVersion = key;
+    }
+    if (!coverage || !FILES_PATH.test(location.pathname)) return;
+    for (const entry of fileEntries()) {
+      for (const line of coverage.files.get(entry.path)?.missed ?? []) {
+        const numberCell = findNewLineCell(entry, line);
+        if (!numberCell) continue;
+        const [first, ...rest] = newSideCells(numberCell);
+        if (first.classList.contains("prr-uncovered-start")) continue;
+        first.classList.add("prr-uncovered-start");
+        if (!first.title) first.title = UNCOVERED_TITLE;
+        for (const cell of rest) cell.classList.add("prr-uncovered-fill");
+      }
+    }
   };
 
   const discoverAdoBase = () => {
@@ -2051,7 +2550,7 @@
       .join("\n");
   };
 
-  const INLINE_CLASSES = ["prr-inline-progress", "prr-inline-leftovers", "prr-inline-deps"];
+  const INLINE_CLASSES = ["prr-inline-progress", "prr-inline-leftovers", "prr-inline-deps", "prr-inline-coverage"];
   const isInline = (node) => INLINE_CLASSES.some((cls) => node.classList?.contains(cls));
 
   const isIconOnly = (node) =>
@@ -2066,7 +2565,7 @@
     let el = counter;
     const text = (node) => [...node.childNodes].filter((child) => !isInline(child)).map((child) => child.textContent).join("");
     const wrapsOnlyCounter = (node) =>
-      node !== document.body && VIEWED_COUNTER.test(text(node)) && !node.querySelector("button:not(.prr-inline-leftovers, .prr-inline-deps), a, [role='button']");
+      node !== document.body && VIEWED_COUNTER.test(text(node)) && !node.querySelector("button:not(.prr-inline-leftovers, .prr-inline-deps, .prr-inline-coverage), a, [role='button']");
     while (el.parentElement && wrapsOnlyCounter(el.parentElement)) el = el.parentElement;
     let prev = el.previousElementSibling;
     while (prev && isInline(prev)) prev = prev.previousElementSibling;
@@ -2082,7 +2581,12 @@
     const both = here ? snapshot?.progressBoth : null;
     const leftovers = here && config.features.leftovers ? leftoverList() : [];
     const deps = here && config.features.depSummary ? allDeps() : [];
-    const counter = both || leftovers.length || deps.length ? findViewedCounter() : null;
+    const coverage = here ? readyCoverage() : null;
+    const summary = coverage ? coverageSummary(coverage.files, coverage.noData) : null;
+    const chip = summary ? coverageChip(summary) : null;
+    // In manual mode nothing loads on its own, so the chip's spot offers the load instead.
+    const idle = here && config.features.coverage && state.coverage?.status === "idle";
+    const counter = both || leftovers.length || deps.length || chip || idle ? findViewedCounter() : null;
     const text = both ? progressText(...both) : "";
     const title = both ? progressTitle(...both) : "";
     syncInline("prr-inline-progress", counter, text && `${text}|${title}`, () => h("span", { class: "prr-inline-progress", title }, text), "after");
@@ -2106,6 +2610,25 @@
       counter && (document.querySelector(".prr-inline-leftovers") ?? counterGroup(counter)),
       depText && `${depText}|${depTitle}`,
       () => h("button", { class: "prr-badge prr-muted prr-inline-deps", type: "button", title: depTitle, onclick: showDepsInPanel }, depText),
+      "before",
+    );
+    // Each inline badge anchors on the one placed before it, so they never compete for the same spot.
+    syncInline(
+      "prr-inline-coverage",
+      counter && (document.querySelector(".prr-inline-deps") ?? document.querySelector(".prr-inline-leftovers") ?? counterGroup(counter)),
+      chip ? `${chip.text}|${chip.title}` : idle ? "idle" : "",
+      () =>
+        chip
+          ? h(
+              "button",
+              { class: `prr-badge prr-${coverageBadgeTone(summary.covered, summary.measured)} prr-inline-coverage`, type: "button", title: chip.title, onclick: stepCoverageChip },
+              chip.text,
+            )
+          : h(
+              "button",
+              { class: "prr-badge prr-muted prr-inline-coverage", type: "button", title: "Download this PR's coverage artifacts from CI", onclick: () => requestCoverage(state.pr) },
+              "Load coverage",
+            ),
       "before",
     );
   };
@@ -2154,6 +2677,87 @@
     );
 
   const MAX_PANEL_ROWS = 8;
+  const COVERAGE_ROWS = 5;
+
+  const coverageSection = () => {
+    const c = config.features.coverage ? state.coverage : null;
+    if (!c || c.status === "quiet") return null;
+    const title = "New-line coverage";
+    const sha7 = c.head?.slice(0, 7) ?? "";
+    const note = (text) => section(title, h("div", { class: "prr-muted" }, text));
+    if (c.status === "idle") {
+      return inlineSection(
+        title,
+        h("button", { class: "prr-btn", type: "button", title: "Download this PR's coverage artifacts from CI", onclick: () => requestCoverage(state.pr) }, "Load coverage"),
+      );
+    }
+    if (c.status === "loading") return note(c.progress ? `Loading coverage ${c.progress[0]}/${c.progress[1]}…` : "Loading coverage…");
+    if (c.status === "waiting") return note(`Waiting for CI on ${sha7}…`);
+    if (c.status === "none") return note(`No coverage artifacts for ${sha7} (CI may not upload them, or they've expired)`);
+    if (c.status === "error") return note(`Couldn't load coverage: ${c.error}`);
+
+    const s = coverageSummary(c.files, c.noData);
+    const rowBadge = (row) =>
+      row.noData
+        ? badge("no data", "bad")
+        : coverageBadge(`${formatPct(row.measured - row.missed.length, row.measured)} · ${row.missed.length} missed`, row.measured - row.missed.length, row.measured);
+    const rows = (coverageExpanded ? s.attention : s.attention.slice(0, COVERAGE_ROWS)).map((row) =>
+      h(
+        "a",
+        {
+          href: "#",
+          class: "prr-row",
+          title: row.path,
+          onclick: (e) => {
+            e.preventDefault();
+            if (row.noData) jumpToFile(row.path);
+            else jumpToLine({ path: row.path, line: row.missed[0] });
+          },
+        },
+        h("span", { class: "prr-block" }, row.path.split("/").at(-1)),
+        rowBadge(row),
+      ),
+    );
+    const hidden = s.attention.length - COVERAGE_ROWS;
+    const notMeasured = coverageFiles().filter((f) => !c.files.has(f.filename) && !c.noData.includes(f.filename)).length;
+    const { owner, repo } = state.pr;
+    return inlineSection(
+      title,
+      uncoveredList().length
+        ? h(
+            "span",
+            { class: "prr-seg" },
+            h("button", { class: "prr-btn", type: "button", title: "Alt+Shift+U", onclick: () => stepUncovered(-1) }, "◀ Prev"),
+            h("button", { class: "prr-btn", type: "button", title: "Alt+U", onclick: () => stepUncovered(1) }, "Next ▶"),
+          )
+        : null,
+      h(
+        "div",
+        { class: "prr-row" },
+        s.measured
+          ? coverageBadge(`${formatPct(s.covered, s.measured)} · ${s.covered} / ${s.measured} lines`, s.covered, s.measured)
+          : h("span", { class: "prr-muted" }, "No measured new lines"),
+        h("span", { class: "prr-muted" }, "CI run ", h("a", { href: `/${owner}/${repo}/actions/runs/${c.run}` }, `#${c.run}`), ` · ${sha7}`),
+      ),
+      c.incomplete ? h("div", { class: "prr-warn prr-coverage-note" }, "A CI job failed or an artifact couldn't be read; coverage may be incomplete") : null,
+      ...rows,
+      hidden > 0
+        ? h(
+            "button",
+            {
+              class: "prr-btn",
+              type: "button",
+              onclick: () => {
+                coverageExpanded = !coverageExpanded;
+                renderPanel(true);
+              },
+            },
+            coverageExpanded ? "Show fewer" : `+ ${hidden} more`,
+          )
+        : null,
+      h("div", { class: "prr-muted" }, `${s.fully} file${s.fully === 1 ? "" : "s"} fully covered · ${notMeasured} tests/config not measured`),
+    );
+  };
   const MAX_DEP_ROWS = 25;
 
   const SECTION_TAGS = { devDependencies: "dev", peerDependencies: "peer", optionalDependencies: "optional", dependencies: "" };
@@ -2293,7 +2897,7 @@
                   onclick: (e) => {
                     e.preventDefault();
                     leftoverCursor = index;
-                    jumpToLeftover(item);
+                    jumpToLine(item);
                   },
                 },
                 `${item.path.split("/").at(-1)}:${item.line} `,
@@ -2305,6 +2909,9 @@
         );
       }
     }
+
+    const coverage = coverageSection();
+    if (coverage) out.push(coverage);
 
     if (config.features.depSummary && state.files) {
       const manifests = state.files.filter((file) => file.deps.length);
@@ -2505,6 +3112,8 @@
     { keys: ["Alt", "G"], label: "Suggest a change on the selected lines", feature: "suggestFromSelection", filesOnly: true },
     { keys: ["Alt", "L"], label: "Next debug leftover", feature: "leftovers", filesOnly: true },
     { keys: ["Alt", "Shift", "L"], label: "Previous debug leftover", feature: "leftovers", filesOnly: true },
+    { keys: ["Alt", "U"], label: "Next uncovered new line", feature: "coverage", filesOnly: true },
+    { keys: ["Alt", "Shift", "U"], label: "Previous uncovered new line", feature: "coverage", filesOnly: true },
   ];
 
   const shortcutRow = ({ keys, label, filesOnly }) =>
@@ -2527,6 +3136,7 @@
     state.version += 1;
     scan();
     renderPanel(true);
+    if (state.pr) refreshCoverage(state.pr);
   };
 
   const settingRow = ({ key, label, hint, note }) =>
@@ -3281,6 +3891,10 @@
     placePrMarks();
     pendingReviewCount();
     savePendingReview();
+    markUncovered();
+    if (state.files && config.features.coverage && config.features.coverageAuto && FILES_PATH.test(location.pathname) && !coverageRequested.has(state.pr.key)) {
+      requestCoverage(state.pr);
+    }
   };
 
   GM_addStyle(`
@@ -3333,10 +3947,10 @@
       padding: 1px 6px; margin-right: 6px; border-radius: 999px; white-space: nowrap; }
     .prr-inline-progress { display: inline-flex; align-items: center; align-self: center; vertical-align: middle; margin-left: 8px; font-size: 12px;
       white-space: nowrap; color: var(--fgColor-muted, #656d76); font-variant-numeric: tabular-nums; }
-    .prr-inline-leftovers, .prr-inline-deps { margin: 0 8px 0 0; font-family: inherit; cursor: pointer; }
-    .prr-inline-leftovers { border: 0; }
+    .prr-inline-leftovers, .prr-inline-deps, .prr-inline-coverage { margin: 0 8px 0 0; font-family: inherit; cursor: pointer; }
+    .prr-inline-leftovers, .prr-inline-coverage { border: 0; }
     .prr-inline-deps { color: var(--fgColor-muted, #656d76); background: transparent; }
-    .prr-inline-leftovers:hover, .prr-inline-deps:hover { text-decoration: underline; }
+    .prr-inline-leftovers:hover, .prr-inline-deps:hover, .prr-inline-coverage:hover { text-decoration: underline; }
     .prr-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-left: 6px; vertical-align: middle;
       font-size: 11px; font-weight: 400; line-height: 16px; }
     .prr-meta .prr-badge { margin-right: 0; text-decoration: none; }
@@ -3354,6 +3968,12 @@
     a.prr-new { background: var(--bgColor-accent-muted, #ddf4ff); color: var(--fgColor-accent, #0969da); }
     a.prr-new:hover { text-decoration: underline; }
     .prr-warn { background: var(--bgColor-attention-muted, #fff8c5); color: var(--fgColor-attention, #9a6700); }
+    .prr-bad { background: var(--bgColor-danger-muted, #ffebe9); color: var(--fgColor-danger, #d1242f); }
+    .prr-coverage-note { padding: 2px 6px; border-radius: 6px; }
+    /* GitHub paints added lines on the cells and sometimes on their children, so the tint overrides both. */
+    .prr-uncovered-start, .prr-uncovered-fill, .prr-uncovered-start > *, .prr-uncovered-fill > * {
+      background-color: var(--bgColor-danger-muted, #ffebe9) !important; }
+    .prr-uncovered-start { color: var(--fgColor-danger, #d1242f) !important; font-weight: 600; box-shadow: inset 4px 0 0 var(--fgColor-danger, #d1242f); }
     .prr-tree-dim > div { opacity: .55; }
     .prr-on { font-weight: 600; background: var(--bgColor-accent-muted, #ddf4ff); }
     .prr-badge.prr-muted { border: 1px solid var(--borderColor-default, #d0d7de); }
@@ -3361,6 +3981,7 @@
     .prr-tree-dot { flex: none; align-self: center; width: 7px; height: 7px; margin: 0 8px 0 6px; border-radius: 50%; }
     .prr-tree-dot-notmine { background: var(--fgColor-attention, #9a6700); }
     .prr-tree-dot-changed { background: var(--fgColor-accent, #0969da); }
+    .prr-tree-dot-uncovered { background: var(--fgColor-danger, #d1242f); }
     .prr-body-hidden, .prr-filter-hide { display: none !important; }
     #prr-toast { position: fixed; left: 50%; bottom: 24px; z-index: 100; transform: translateX(-50%); padding: 6px 14px;
       font-size: 12px; border-radius: 8px; background: var(--bgColor-emphasis, #24292f); color: var(--fgColor-onEmphasis, #fff);
@@ -3475,6 +4096,7 @@
       renderPanel(true);
       // Leftovers are found while parsing the diff, so new patterns need a re-fetch.
       if (state.pr && JSON.stringify(config.leftoverPatterns) !== leftoverPatterns) loadData(state.pr);
+      else if (state.pr) refreshCoverage(state.pr);
     } catch (err) {
       alert(`Invalid JSON: ${err.message}`);
     }
@@ -3544,6 +4166,11 @@
       if (config.features.leftovers && event.code === "KeyL") {
         event.preventDefault();
         stepLeftover(event.shiftKey ? -1 : 1);
+        return;
+      }
+      if (config.features.coverage && event.code === "KeyU") {
+        event.preventDefault();
+        stepUncovered(event.shiftKey ? -1 : 1);
         return;
       }
     }
