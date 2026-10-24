@@ -52,7 +52,7 @@ PRs (about 5–8), each built to light up specific features:
 
 **Coverage:** the repo uses Vitest with `@vitest/coverage-v8` and the `cobertura` reporter. A GitHub Actions workflow on `pull_request` checks out the PR head SHA (per the README's "What CI needs to do") and uploads the XML with `actions/upload-artifact` in an artifact named `coverage`. One PR's tests deliberately leave a few new lines unrun (an error branch, a fallback) so the result lands in the amber band (~70–79%) with visible red lines, rather than all green.
 
-The stand-in `GM_xmlhttpRequest` can't follow the artifact download's redirect to `blob.core.windows.net` (CORS). For `…/actions/runs/<run>/artifacts/<id>` URLs, the builder downloads the same zip with `gh api repos/<owner>/<repo>/actions/artifacts/<id>/zip`, passes it into the page (e.g. base64 via `orca eval`) and has the stand-in return those bytes for that URL. The script parses the real artifact; only the transport differs.
+The stand-in `GM_xmlhttpRequest` can't follow the artifact download's redirect to `blob.core.windows.net` (CORS). For `…/actions/runs/<run>/artifacts/<id>` URLs, the builder downloads the same zip with `gh api repos/<owner>/<repo>/actions/artifacts/<id>/zip`, passes it into the page (e.g. base64 via `orca eval`) and has the stand-in return those bytes for that URL. The script parses the real artifact; only the transport differs. If this can't be made to work, ship the rest without the coverage shot and say so in the PR; the owner can add it later.
 
 Several PRs being authored by `waterfausett` is fine ("My PRs"); review-state scenarios that need "someone else's PR" may be approximated, since there is one account.
 
