@@ -8,7 +8,6 @@ A floating panel, per-file helpers and keyboard shortcuts for GitHub PRs.<br>
 No token needed: it reads GitHub through your already signed-in browser session.
 
 [![Install PR Review Toolkit](https://img.shields.io/badge/Install-PR%20Review%20Toolkit-2ea44f?style=for-the-badge&logo=tampermonkey&logoColor=white)](https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js)
-[![Install Actions Workflow Filter](https://img.shields.io/badge/Install-Actions%20Workflow%20Filter-0969da?style=for-the-badge&logo=githubactions&logoColor=white)](https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-actions-workflow-filter.user.js)
 
 [Install](#-install) · [Setup](#-first-time-setup) · [Shortcuts](#-keyboard-shortcuts) · [Features](#-features) · [How data is loaded](#-how-data-is-loaded) · [Maintenance](#-maintenance-notes)
 
@@ -23,7 +22,7 @@ No token needed: it reads GitHub through your already signed-in browser session.
 ## 🚀 Install
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
-2. Open [gh-pr-review-toolkit.user.js](https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js) and click **Install**. The optional [Actions workflow filter](https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-actions-workflow-filter.user.js), which adds a filter box to the workflows sidebar on Actions pages, installs the same way.
+2. Open [gh-pr-review-toolkit.user.js](https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js) and click **Install**.
 3. Open a PR. Tampermonkey will ask to allow connections to `github.com`, `raw.githubusercontent.com`, `patch-diff.githubusercontent.com` and `blob.core.windows.net` (where GitHub serves Actions artifacts, for new-line coverage); allow them.
 
 ### 🔄 Updates
@@ -369,12 +368,6 @@ A PR's header gets **☆ Star** and **🔖 Save for later** next to its state la
 
 Each chip is an ordinary query: GitHub's Pull requests search ORs the `#n` refs, so you can open one and add filters. Every chip query ends in `#pr_number_exact_match`: GitHub also adds a full-text match on all the terms, so a lone `#7` would pull in #17 and #77, and a term no PR contains empties that half and leaves only the listed numbers. A chip is hidden while its list is empty, and the count is what's stored, not what GitHub shows. Each list has its own toggle under **PR lists** in the settings. Only the lowercased `owner/repo` and PR numbers are stored, under `prLists`, never titles.
 </details>
-
-### ⚙️ Actions workflow filter
-
-A separate script ([install](https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-actions-workflow-filter.user.js)): a filter box at the top of the workflows sidebar on Actions pages, with a match count.
-
-<img src="docs/images/workflow-filter.png" width="760" alt="The workflows sidebar on a repo's Actions page filtered to &quot;deploy&quot;, showing 2 of 9 workflows">
 
 ## 📡 How data is loaded
 
