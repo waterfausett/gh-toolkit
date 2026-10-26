@@ -1896,9 +1896,14 @@
     return `${fence}suggestion\n${text}\n${fence}\n`;
   };
 
+  // #region diff-line — reads diff row elements only, no toolkit state (tests/diff-line.test.mjs evaluates this block)
+  // The current diff view repeats data-line-number on the code cell, so it is told apart by its code content.
+  const isCodeCell = (cell) => cell.matches(".diff-text-cell, .blob-code") || !!cell.querySelector(".diff-text-inner, .blob-code-inner");
+  const isNumberCell = (cell) => cell.hasAttribute("data-line-number") && !isCodeCell(cell);
+
   const codeCellAfter = (numberCell) => {
     let cell = numberCell.nextElementSibling;
-    while (cell?.hasAttribute("data-line-number")) cell = cell.nextElementSibling;
+    while (cell && isNumberCell(cell)) cell = cell.nextElementSibling;
     return cell;
   };
 
@@ -1912,13 +1917,14 @@
   };
 
   const diffLine = (row) => {
-    const numbered = [...row.querySelectorAll("[data-line-number]")].filter((cell) => /^\d+$/.test(cell.dataset.lineNumber));
+    const numbered = [...row.querySelectorAll("[data-line-number]")].filter((cell) => /^\d+$/.test(cell.dataset.lineNumber) && !isCodeCell(cell));
     const cell = numbered.at(-1);
     if (!cell) return null;
     if (cellSide(cell) === "L") return { deleted: true };
     const code = codeCellAfter(cell);
     return code ? { row, cell, code, n: Number(cell.dataset.lineNumber), text: codeText(code) } : null;
   };
+  // #endregion diff-line
 
   const selectedNewLines = (first, last) => {
     const lines = [];
