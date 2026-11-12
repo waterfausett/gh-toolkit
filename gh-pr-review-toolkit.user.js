@@ -1414,25 +1414,33 @@
     }
   };
 
+  // Classic timeline: a.author. Overview (React) timeline: avatar-link, whose hovercard type is "user" even for apps, so the /apps/ href is what tells bots apart.
   const isBotAuthor = (item) => {
-    const author = item.querySelector("a.author, a[data-hovercard-type='app']");
+    const author = item.querySelector("a.author, a[data-hovercard-type='app'], a[data-testid='avatar-link']");
     const name = author?.textContent?.trim() ?? "";
     return /\[bot\]$/i.test(name) || /^copilot/i.test(name) || author?.getAttribute("href")?.startsWith("/apps/");
   };
 
   const applyNoiseDefault = () => document.body.classList.toggle("prr-hide-noise", config.features.hideNoise);
 
+  const TIMELINE_ITEM = ".js-timeline-item, [data-testid='timeline-item']";
+
   const processNoise = () => {
-    for (const item of document.querySelectorAll(".js-timeline-item:not([data-prr-noise])")) {
+    for (const item of document.querySelectorAll(`:is(${TIMELINE_ITEM}):not([data-prr-noise])`)) {
+      // The overview renders an item's author a beat after the item itself; leave it unmarked until it does.
+      if (item.matches("[data-testid='timeline-item']") && !item.querySelector("a[data-testid='avatar-link']") && !item.querySelector("[data-testid='timeline-commit-group']")) continue;
       item.dataset.prrNoise = "1";
       if (isBotAuthor(item)) item.classList.add("prr-noise");
     }
   };
 
-  const unresolvedThreads = () =>
-    [...document.querySelectorAll("[data-resolved='false']")].filter(
-      (el) => !el.parentElement?.closest("[data-resolved='false']"),
-    );
+  // Classic: data-resolved on the thread. Overview: an open thread offers Resolve and a resolved one offers Unresolve; a review's <article> can wrap several thread <article>s, so the innermost one is the thread.
+  const OVERVIEW_RESOLVE = "[data-dd-action-name='pull_requests.thread.resolve']";
+  const unresolvedThreads = () => {
+    const classic = [...document.querySelectorAll("[data-resolved='false']")].filter((el) => !el.parentElement?.closest("[data-resolved='false']"));
+    const overview = [...document.querySelectorAll(OVERVIEW_RESOLVE)].map((button) => button.closest("article, [data-testid='timeline-item']"));
+    return [...new Set([...classic, ...overview.filter(Boolean)])];
+  };
 
   const flash = (el) => {
     el.classList.add("prr-flash");
@@ -1460,7 +1468,10 @@
     flash(target);
   };
 
+  // The overview's merge box has no Checks heading, only a collapsible Checks row.
+  const OVERVIEW_CHECKS_TOGGLE = "[data-dd-action-name='pull_requests.checks.expand']";
   const findChecksHeading = () =>
+    document.querySelector(OVERVIEW_CHECKS_TOGGLE)?.closest("[data-testid='mini-status']") ??
     [...document.querySelectorAll("h2, h3")].find(
       (el) => el.textContent.length < 80 && /\bchecks?\b/i.test(el.textContent) && !el.closest(".timeline-comment, .js-comment") && el.getClientRects().length,
     );
@@ -1490,6 +1501,8 @@
 
   // Lazy timeline content and GitHub's own scroll restoration move the merge box after we land, so the position is re-applied until it stops drifting or the user takes over.
   const scrollToChecks = (heading) => {
+    const toggle = heading.querySelector(OVERVIEW_CHECKS_TOGGLE);
+    if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
     const topOffset = () => window.innerHeight * CHECKS_VIEWPORT_OFFSET;
     const drift = () => heading.getBoundingClientRect().top - topOffset();
     heading.scrollIntoView({ block: "start", behavior: "auto" });
@@ -1590,7 +1603,8 @@
     },
     review: {
       key: "prr-jump-review",
-      here: () => FILES_PATH.test(location.pathname),
+      // The overview pins GitHub's review button in its header, so the dialog opens in place there.
+      here: () => FILES_PATH.test(location.pathname) || (onConversationTab() && overviewExperience()),
       href: () => tabHref(NAV_TABS[3]),
       find: findReviewButton,
       land: (button) => button.click(),
@@ -2988,6 +3002,10 @@
 
   const jumps = (tab) => tab.jumpsToSummary && !config.features.checksTab;
 
+  // GitHub's opt-in PR overview replaces the Conversation tab with an Overview tab at the same URL.
+  const overviewExperience = () =>
+    /^\s*Overview\b/.test(document.querySelector("[data-dd-action-name='pull_requests.navigation.conversation']")?.textContent ?? "");
+
   const activateTab = (tab) => (jumps(tab) ? jumpToChecks() : goTo(tabHref(tab)));
 
   const tabHref = (tab) =>
@@ -3047,7 +3065,7 @@
               activateTab(tab);
             },
           },
-          jumps(tab) ? `${tab.label} ↓` : tab.label,
+          jumps(tab) ? `${tab.label} ↓` : tab === NAV_TABS[0] && overviewExperience() ? "Overview" : tab.label,
         ),
       ),
     );

@@ -82,14 +82,14 @@ Click any feature for the details.
 <summary><b>Always-visible tab nav</b> — Conversation / Commits / Checks / Files in the panel</summary>
 <br>
 
-<kbd>Alt</kbd>+<kbd>1</kbd>..<kbd>4</kbd>. By default **Checks ↓** scrolls to the merge box's checks summary on the Conversation tab (going there first if you're on another tab); turn on "Checks nav item opens the Checks tab" in settings to open the tab instead. The title bar also has a ↑ Top button that stays put when the panel is collapsed. Handles both `/files` and `/changes`. Plain clicks navigate in-page by clicking a real link so GitHub's own router handles it; if the URL hasn't changed after 1.5s the script falls back to a full page load.
+<kbd>Alt</kbd>+<kbd>1</kbd>..<kbd>4</kbd>. By default **Checks ↓** scrolls to the merge box's checks summary on the Conversation tab (going there first if you're on another tab; on GitHub's new PR overview it also expands the merge box's Checks row); turn on "Checks nav item opens the Checks tab" in settings to open the tab instead. The title bar also has a ↑ Top button that stays put when the panel is collapsed. Handles both `/files` and `/changes`. Plain clicks navigate in-page by clicking a real link so GitHub's own router handles it; if the URL hasn't changed after 1.5s the script falls back to a full page load.
 </details>
 
 <details>
 <summary><b>Review button</b> — opens GitHub's review dialog from any tab</summary>
 <br>
 
-**Review** in the panel bar, or <kbd>Alt</kbd>+<kbd>R</kbd>. Clicks GitHub's own "Review changes" / "Submit review" button so its review dialog opens; it never submits anything. From another tab it goes to Files first and waits up to 10s for the button to render (the pending jump survives the full-load fallback, like Checks ↓). Buttons inside a form or dialog are skipped, so the dialog's own submit button is never clicked.
+**Review** in the panel bar, or <kbd>Alt</kbd>+<kbd>R</kbd>. Clicks GitHub's own "Review changes" / "Submit review" button so its review dialog opens; it never submits anything. On GitHub's new PR overview the button is in the pinned header, so the dialog opens in place. From another tab it goes to Files first and waits up to 10s for the button to render (the pending jump survives the full-load fallback, like Checks ↓). Buttons inside a form or dialog are skipped, so the dialog's own submit button is never clicked.
 </details>
 
 <details>
@@ -206,7 +206,7 @@ CODEOWNERS, last matching rule wins. "Mine" is your login or any `myOwners` team
 <summary><b>Hide bot comments</b></summary>
 <br>
 
-Conversation tab timeline items authored by bots.
+Conversation tab timeline items authored by bots, and the comments on GitHub's new PR overview.
 </details>
 
 <details>
@@ -456,6 +456,13 @@ Debug leftover jumps find the line by the classic diff's cell id `<file id>R<lin
 <br>
 
 Dependency sections are tracked per side (old/new) from header lines seen in each hunk (`"devDependencies": {`, `[tool.poetry.dependencies]`, `dependencies = [`) and from git's hunk-header context, which for TOML is often the enclosing `key = [` line. When a hunk starts inside a section without showing its header, entries are guessed by shape: in `package.json`, a `"name": "<version-like>"` line indented two levels or more (excluding `version`, `node`, `npm` and similar); in `pyproject.toml`, a quoted requirement with a version operator, or a `name = "^1.2"`-style Poetry line. Unchanged context lines only update the section state; a package that appears with the same version on both sides is not listed unless it moved between known sections.
+</details>
+
+<details>
+<summary><b>GitHub's new PR overview</b></summary>
+<br>
+
+The opt-in overview (an Overview tab at the Conversation tab's URL, with a "Preview" badge next to the title) is a separate React page. It is detected by the label of the `[data-dd-action-name="pull_requests.navigation.conversation"]` tab (`overviewExperience`). Its timeline items are `[data-testid="timeline-item"]`, and each item's author is `a[data-testid="avatar-link"]`. That link's hovercard type is `user` even for apps, so bots are told apart by their `/apps/` href (`isBotAuthor`, `processNoise`). Open threads offer `[data-dd-action-name="pull_requests.thread.resolve"]` and resolved ones `…thread.unresolve`. A review's `<article>` can wrap several thread `<article>`s, so the innermost article holding a Resolve button is one unresolved thread (`unresolvedThreads`). The merge box has no Checks heading. **Checks ↓** lands on the `[data-testid="mini-status"]` row holding `[data-dd-action-name="pull_requests.checks.expand"]` and clicks that toggle open (`findChecksHeading`, `scrollToChecks`). The pinned header's state label and review button are the same `StateLabel` and `ReviewMenuButton__` components the other views use, so star/save marks and the pending-review warning need nothing extra.
 </details>
 
 <details>
