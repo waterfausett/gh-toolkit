@@ -62,6 +62,7 @@
       laterPrs: true,
       recentPrs: true,
       pendingChip: true,
+      draftToggle: true,
     },
     snippets: {
       nit: "nit: ",
@@ -174,6 +175,7 @@
         { key: "laterPrs", label: "Saved for later", note: "🔖 on a PR or a list row; dropped once merged or closed" },
         { key: "recentPrs", label: "Recently viewed PRs", note: "The last 50 you opened in each repo" },
         { key: "pendingChip", label: "Pending reviews chip", note: "Needs \"Review badges in PR lists\", which records them" },
+        { key: "draftToggle", label: "\"Is draft\" toggle", note: "Adds or removes draft:true in the search" },
       ],
     },
   ];
@@ -3690,6 +3692,9 @@
   let savedSearchEdit = null;
 
   const normalizeQuery = (q) => q.trim().replace(/\s+/g, " ");
+  // On drops every draft qualifier; off swaps any draft:false for draft:true. GitHub also reads is:draft, so it counts as on.
+  const isDraftOn = (q) => q.split(/\s+/).some((t) => /^(draft:true|is:draft)$/i.test(t));
+  const toggleDraftQuery = (q) => { const on = isDraftOn(q); const rest = q.split(/\s+/).filter((t) => t && !/^(draft:(true|false)|is:draft)$/i.test(t)); return (on ? rest : [...rest, "draft:true"]).join(" "); };
   // GitHub repo URLs are case-insensitive, so the list is keyed by the lowercased owner/repo.
   const savedSearchRepo = (m) => `${m[1]}/${m[2]}`.toLowerCase();
   const loadSavedSearches = (repo) => store.get("savedSearches", {})[repo] ?? [];
@@ -3790,7 +3795,8 @@
     const existing = document.getElementById("prr-saved");
     const saving = config.features.savedSearches;
     const chips = m ? listChips(m[1], m[2]) : [];
-    if (!m || !host || !(saving || chips.length)) {
+    const drafts = config.features.draftToggle;
+    if (!m || !host || !(saving || chips.length || drafts)) {
       existing?.remove();
       return;
     }
@@ -3802,7 +3808,7 @@
     const fromQuery = savedFrom(repo);
     const from = active < 0 && fromQuery ? list.findIndex((search) => search.q === fromQuery) : -1;
     const edit = savedSearchEdit?.repo === repo ? savedSearchEdit : null;
-    const signature = JSON.stringify([list, chips, saving, current, from, edit]);
+    const signature = JSON.stringify([list, chips, saving, drafts, current, from, edit]);
     if (existing?.dataset.signature === signature && existing.previousElementSibling === host) return;
 
     const hrefFor = (q) => `/${m[1]}/${m[2]}/pulls?q=${encodeURIComponent(q)}`;
@@ -3861,9 +3867,21 @@
       storeSavedSearches(repo, list.map((search, i) => (i === from ? { ...search, q: current } : search)));
     };
     const saveNew = () => startEdit({ index: null, name: "", q: normalizeQuery(input.value) });
+    // Keeps the remembered saved search, so toggling drafts on one offers to update it.
+    const draftOn = isDraftOn(current);
+    const draftQ = toggleDraftQuery(current);
+    const draftChip = drafts
+      ? h(
+          "span",
+          { class: `prr-saved-chip prr-list-chip${draftOn ? " prr-on" : ""}`, title: draftOn ? "Showing drafts only; click to show all" : "Show drafts only" },
+          h("a", { href: hrefFor(draftQ), role: "button", "aria-pressed": String(draftOn), onclick: (event) => open(event, draftQ, active >= 0 ? list[active].q : fromQuery ?? "") }, "◌ Is draft"),
+        )
+      : null;
     const box = h(
       "div",
       { id: "prr-saved", "data-signature": signature },
+      draftChip,
+      draftChip && (chips.length || saving) ? h("span", { class: "prr-saved-sep" }) : null,
       ...chips.map(listChip),
       chips.length && saving ? h("span", { class: "prr-saved-sep" }) : null,
       ...list.map(chip),
