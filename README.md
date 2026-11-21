@@ -350,7 +350,7 @@ The ticket chips also appear after PR titles in lists, after branch names on the
 
 A row of chips under the search box on `/<owner>/<repo>/pulls`. Build a query with the search box or the Author / Label / Reviews menus, click **☆ Save current** and name it; the chip then loads that query, and is highlighted while it's the one applied. Hover a chip for **✎** (rename it or edit the query by hand) and **×** (delete, with Undo). Drag chips to reorder them.
 
-The row starts with an **◌ Is draft** toggle: it adds `draft:true` to whatever query is applied, or takes it (and `is:draft`) back out, so it combines with any chip or saved search. It's lit while the query holds drafts only, and can be turned off under **PR lists** in the settings.
+The row starts with a **◐ Is draft** toggle: it adds `draft:true` to whatever query is applied, or takes it (and `is:draft`) back out, so it combines with any chip or saved search. It's lit while the query holds drafts only, and can be turned off under **PR lists** in the settings.
 
 If you open a chip and then change the filters, it gets a **●** and you're offered **↻ Update "name"** (save the new query over it) or **☆ Save as new**.
 
