@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR Review Toolkit
 // @namespace    https://github.com/waterfausett
-// @version      0.18.0
+// @version      0.18.1
 // @description  Viewed-state across pushes, thread navigation, noise hiding, ownership, ticket chips, snippets and stats panel for GitHub PRs.
 // @updateURL    https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/waterfausett/gh-toolkit/master/gh-pr-review-toolkit.user.js
@@ -3692,6 +3692,8 @@
   let savedSearchEdit = null;
 
   const normalizeQuery = (q) => q.trim().replace(/\s+/g, " ");
+  // GitHub refills the box with state:open for a search run as is:open, so the two spellings count as the same search. Only for comparing; queries are stored as typed.
+  const sameQuery = (a, b) => { const canon = (q) => normalizeQuery(q).split(" ").map((t) => t.replace(/^is:(open|closed)$/i, (_, s) => `state:${s.toLowerCase()}`)).join(" "); return canon(a) === canon(b); };
   // On drops every draft qualifier; off swaps any draft:false for draft:true. GitHub also reads is:draft, so it counts as on.
   const isDraftOn = (q) => q.split(/\s+/).some((t) => /^(draft:true|is:draft)$/i.test(t));
   const toggleDraftQuery = (q) => { const on = isDraftOn(q); const rest = q.split(/\s+/).filter((t) => t && !/^(draft:(true|false)|is:draft)$/i.test(t)); return (on ? rest : [...rest, "draft:true"]).join(" "); };
@@ -3803,10 +3805,10 @@
     const repo = savedSearchRepo(m);
     const list = saving ? loadSavedSearches(repo) : [];
     const current = normalizeQuery(new URLSearchParams(location.search).get("q") ?? input.value);
-    const active = list.findIndex((search) => search.q === current);
-    const builtInActive = chips.some((c) => c.q === current);
+    const active = list.findIndex((search) => sameQuery(search.q, current));
+    const builtInActive = chips.some((c) => sameQuery(c.q, current));
     const fromQuery = savedFrom(repo);
-    const from = active < 0 && fromQuery ? list.findIndex((search) => search.q === fromQuery) : -1;
+    const from = active < 0 && fromQuery ? list.findIndex((search) => sameQuery(search.q, fromQuery)) : -1;
     const edit = savedSearchEdit?.repo === repo ? savedSearchEdit : null;
     const signature = JSON.stringify([list, chips, saving, drafts, current, from, edit]);
     if (existing?.dataset.signature === signature && existing.previousElementSibling === host) return;
@@ -3822,7 +3824,7 @@
     const listChip = (c) =>
       h(
         "span",
-        { class: `prr-saved-chip prr-list-chip${c.q === current ? " prr-on" : ""}`, title: c.q },
+        { class: `prr-saved-chip prr-list-chip${sameQuery(c.q, current) ? " prr-on" : ""}`, title: c.q },
         h("a", { href: hrefFor(c.q), onclick: (event) => open(event, c.q, "") }, `${c.icon} ${c.name}`, h("span", { class: "prr-list-count" }, String(c.count))),
       );
     const startEdit = (fields) => {
